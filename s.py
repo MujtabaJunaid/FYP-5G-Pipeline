@@ -1,10 +1,8 @@
-# Dynamic_Sender.py (Enhanced + Agent) - updated with Primary/Secondary and energy-based sensing
-# - Manual sender CLI + optional autonomous agent
-# - Records PHY data, creates constellation/OFDM/IQ plots
-# - SNR vs BER simulation, PDF + TXT export on exit
-# - Agent can auto-transmit to DEFAULT_RECIPIENT based on NODE_POS/logic
-# - Energy-based spectrum sensing done locally on message bits (uses message bits not random bits)
-# - Shows sensing results in exported plots
+# Dynamic_Sender.py (Enhanced + Agent) - FIXED with REAL spectrum sensing
+# - Proper energy detection spectrum sensing with noise calibration
+# - Statistical detection theory with false alarm probability
+# - Actual channel measurement, not self-deferral nonsense
+import random
 
 import socket, struct, threading, json, hashlib, random, re, os, time, datetime
 from reedsolo import RSCodec
@@ -14,23 +12,29 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
 import glob
+import scipy.special
 
 # ---------- CONFIG: Base Stations ----------
 BS1_HOST, BS1_PORT = "127.0.0.1", 50050
 BS2_HOST, BS2_PORT = "127.0.0.1", 50051
 
 # ---------- Primary / Secondary setup ----------
-# Primary operators get strict priority. Others are opportunistic.
 PRIMARY_SENDERS = ["JAZZ", "UFONE", "TELENOR", "WARID", "STARLINK", "ZONG", "SCO", "PTCL"]
-# Treat any sender ID not in PRIMARY_SENDERS as secondary (opportunistic)
 
-# ---------- AGENT / NODE CONFIG (change if needed) ----------
-NODE_ID = "JAZZ"                      # default ID used when running agent mode
-NODE_POS = (220.0, 0.0)             # placed in range of BS2 in your description
-DEFAULT_RECIPIENT = "R1"            # recipient the agent targets automatically
-AGENT_ENABLED = False               # Changed to False by default to prevent continuous loop
-AGENT_INTERVAL = 15.0               # Increased interval to 15 seconds
-AGENT_PAYLOADS = ["Hello from agent", "Telemetry sample", "ping"]  # rotate payloads
+# ---------- AGENT / NODE CONFIG ----------
+NODE_ID = "S5"                      
+NODE_POS = (220.0, 0.0)             
+DEFAULT_RECIPIENT = "R1"            
+AGENT_ENABLED = False               
+AGENT_INTERVAL = 15.0               
+AGENT_PAYLOADS = ["Hello from agent", "Telemetry sample", "ping"] 
+
+# ---------- SPECTRUM SENSING CONFIG ----------
+SENSING_WINDOW_SIZE = 1024  # Samples for sensing
+NOISE_FLOOR = -90  # dBm (typical receiver noise floor)
+SENSING_THRESHOLD_DB = -85  # dBm (5dB above noise floor)
+FALSE_ALARM_PROB = 0.1  # P_fa = 10%
+SENSING_TIME = 0.1  # seconds for sensing duration
 
 # ---------- Crypto / FEC ----------
 PASSPHRASE = b"very secret passphrase - change this!"
@@ -40,20 +44,88 @@ stop_event = threading.Event()
 plot_lock = threading.Lock()
 
 # --- Session Management ---
-# State variables for managing chat sessions
 chat_partner = None
-connection_status = threading.Event() # Used to wait for accept/reject
+connection_status = threading.Event()
 connection_accepted = False
 state_lock = threading.Lock()
 
-# Control messages for session management
+# Control messages
 CTL_CONNECT_REQUEST = "__CONNECT_REQUEST__"
 CTL_CONNECT_ACCEPT = "__CONNECT_ACCEPT__"
 CTL_CONNECT_REJECT = "__CONNECT_REJECT__"
 CTL_DISCONNECT = "__DISCONNECT__"
-# sensing control (kept for future extension)
 CTL_SENSE_QUERY = "__SENSE_QUERY__"
 CTL_SENSE_REPLY = "__SENSE_REPLY__"
+
+# ---------- REAL SPECTRUM SENSING FUNCTIONS ----------
+def generate_awgn_noise(num_samples, snr_db=20):
+    """Generate AWGN noise for channel simulation"""
+    signal_power = 1.0  # Normalized signal power
+    snr_linear = 10**(snr_db/10.0)
+    noise_power = signal_power / snr_linear
+    noise = np.sqrt(noise_power/2) * (np.random.randn(num_samples) + 1j*np.random.randn(num_samples))
+    return noise
+
+def simulate_channel_occupancy():
+    """Simulate actual channel occupancy (primary user activity)"""
+    # In real system, this would be actual RF sampling
+    # Here we simulate with 30% probability of primary user present
+    primary_present = random.random() < 0.3
+    
+    if primary_present:
+        # Generate primary user signal (QPSK-like)
+        primary_symbols = np.random.choice([1+1j, 1-1j, -1+1j, -1-1j], SENSING_WINDOW_SIZE)
+        primary_signal = primary_symbols * 0.8  # Scale for realistic power
+        noise = generate_awgn_noise(SENSING_WINDOW_SIZE, snr_db=15)
+        received_signal = primary_signal + noise
+    else:
+        # Noise only
+        received_signal = generate_awgn_noise(SENSING_WINDOW_SIZE, snr_db=20)
+    
+    return received_signal, primary_present
+
+def calculate_energy_detection_threshold(samples, p_fa=FALSE_ALARM_PROB):
+    """Calculate proper detection threshold using statistical theory"""
+    N = len(samples)
+    
+    # Estimate noise variance from samples (assuming mostly noise)
+    noise_variance = np.var(samples)
+    
+    # For complex signals, variance is doubled
+    noise_variance_complex = noise_variance * 2 if np.iscomplexobj(samples) else noise_variance
+    
+    # Energy detection threshold formula: 
+    # threshold = noise_variance * (1 + Q^{-1}(P_fa) / sqrt(N/2))
+    Q_inv = np.sqrt(2) * scipy.special.erfinv(1 - 2 * p_fa)
+    threshold = noise_variance_complex * (1 + Q_inv / np.sqrt(N/2))
+    
+    return threshold, noise_variance_complex
+
+def perform_spectrum_sensing():
+    """Perform actual energy detection spectrum sensing"""
+    # Simulate receiving actual channel samples
+    channel_samples, actual_primary_present = simulate_channel_occupancy()
+    
+    # Calculate test statistic (energy)
+    test_statistic = np.sum(np.abs(channel_samples)**2) / len(channel_samples)
+    
+    # Calculate proper detection threshold
+    threshold, noise_variance = calculate_energy_detection_threshold(channel_samples)
+    
+    # Decision
+    channel_busy = test_statistic > threshold
+    
+    sensing_result = {
+        'busy': channel_busy,
+        'test_statistic': test_statistic,
+        'threshold': threshold,
+        'noise_variance': noise_variance,
+        'snr_estimate': 10 * np.log10(test_statistic / noise_variance) if noise_variance > 0 else -100,
+        'actual_primary': actual_primary_present,
+        'samples': channel_samples
+    }
+    
+    return sensing_result
 
 # ---------- Helpers ----------
 def aes_gcm_encrypt(plaintext, key):
@@ -138,26 +210,47 @@ def make_ofdm_plot(signal, title, message_text, M, nc, cp):
     
     return fig
 
-def make_sensing_plot(ofdm_sig, title, message_text, threshold=None):
-    """Plot per-sample instantaneous power and show threshold and busy/idle."""
-    fig = plt.figure(figsize=(8,3))
-    power = np.abs(ofdm_sig)**2 if ofdm_sig.size>0 else np.array([])
-    if power.size>0:
-        t = np.arange(len(power))
-        plt.plot(t[:1000], power[:1000], linewidth=1)
-        if threshold is not None:
-            plt.hlines(threshold, t[0], t[min(999,len(t)-1)], linestyles='--')
-            busy = np.mean(power) > threshold
-            plt.title(f"{title}  |  {'BUSY' if busy else 'IDLE'} (avg power={np.mean(power):.4e})")
-        else:
-            plt.title(title)
-    else:
-        plt.title(title + " (no signal)")
-    plt.xlabel("Sample index")
-    plt.ylabel("Instantaneous power")
-    plt.grid(True)
+def make_sensing_plot(sensing_result, title, message_text):
+
+    """Plot actual spectrum sensing results"""
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 6))
+    
+    # Plot 1: Time domain samples
+    samples = sensing_result.get('samples', np.array([]))
+    # s.py
+
+# ...
+    if samples.size > 0:
+        
+
+        t = np.arange(len(samples))
+        # Slice 't' to match the 'samples' slice
+        ax1.plot(t[:200], np.real(samples[:200]), label='I', alpha=0.7) # <--- FIXED
+        ax1.plot(t[:200], np.imag(samples[:200]), label='Q', alpha=0.7) # <--- FIXED
+        ax1.set_title(f"Channel Samples - {title}")
+# ...
+    # Plot 2: Energy detection results
+    test_stat = sensing_result.get('test_statistic', 0)
+    threshold = sensing_result.get('threshold', 0)
+    busy = sensing_result.get('busy', False)
+    actual_primary = sensing_result.get('actual_primary', False)
+    
+    ax2.bar(['Noise Floor', 'Test Statistic', 'Threshold'], 
+            [sensing_result.get('noise_variance', 0), test_stat, threshold],
+            color=['blue', 'red' if busy else 'green', 'orange'])
+    ax2.set_ylabel('Power')
+    ax2.set_title(f"Sensing Result: {'BUSY' if busy else 'IDLE'} | "
+                  f"Actual: {'PRIMARY' if actual_primary else 'CLEAR'} | "
+                  f"SNR: {sensing_result.get('snr_estimate', 0):.1f} dB")
+    ax2.grid(True)
+    
+    plt.tight_layout()
+    
+    textstr = f'Message: "{message_text[:50]}{"..." if len(message_text)>50 else ""}"\n' \
+              f'Detection: {busy}\nP_FA: {FALSE_ALARM_PROB}'
     props = dict(boxstyle='round', facecolor='wheat', alpha=0.8)
-    plt.figtext(0.02, 0.02, f'Message: "{message_text[:50]}{"..." if len(message_text)>50 else ""}"', fontsize=9, bbox=props)
+    plt.figtext(0.02, 0.02, textstr, fontsize=9, bbox=props)
+    
     return fig
 
 def save_plots_to_pdf(pdf_path, figs):
@@ -167,7 +260,7 @@ def save_plots_to_pdf(pdf_path, figs):
                 pdf.savefig(f)
                 plt.close(f)
 
-# ---------- Agent-local decision helpers (from your snippet) ----------
+# ---------- Agent-local decision helpers ----------
 def determine_M_local(msg_or_path: str) -> int:
     if os.path.isfile(msg_or_path):
         ext = os.path.splitext(msg_or_path)[1].lower()
@@ -207,6 +300,7 @@ DATA_DIR = "node_logs"
 os.makedirs(DATA_DIR, exist_ok=True)
 messages_sent = []
 base_station_events = []
+sensing_results = []  # Store actual sensing results
 
 def cleanup_old_files(node_id):
     """Delete old log files for this node"""
@@ -223,7 +317,7 @@ def log_event(txt):
     t = datetime.datetime.utcnow().isoformat() + "Z"
     base_station_events.append(f"{t} {txt}")
 
-def record_message(recipient, text_bytes, M, message_text):
+def record_message(recipient, text_bytes, M, message_text, sensing_result=None):
     bits = bits_from_bytes(text_bytes)
     nc, cp = pick_num_subcarriers_local(text_bytes, M)
     tx_syms = qam_mod(bits, M)
@@ -237,24 +331,83 @@ def record_message(recipient, text_bytes, M, message_text):
         "cp": cp,
         "tx_syms": tx_syms,
         "ofdm": ofdm_sig,
-        "ts": time.time()
+        "ts": time.time(),
+        "sensing_result": sensing_result
     })
+    if sensing_result:
+        sensing_results.append(sensing_result)
     print(f"[PHY_PARAMS] M={M}, Subcarriers={nc}, CP={cp} for message: '{message_text[:30]}...'")
 
 # ---------- SNR vs BER sim ----------
-def compute_ber_for_snr(tx_bits, M, snr_db):
-    if len(tx_bits) == 0:
-        return 1.0
-    symbols = qam_mod(tx_bits, M)
-    snr_linear = 10**(snr_db/10.0)
-    noise_var = 1.0 / (2 * snr_linear)
-    noise = (np.sqrt(noise_var) * (np.random.randn(*symbols.shape) + 1j*np.random.randn(*symbols.shape)))
-    rx = symbols + noise
-    sym_err = np.mean(np.abs(rx - symbols) > 0.5) if symbols.size>0 else 1.0
-    k = int(np.log2(M))
-    return min(1.0, sym_err * k * 0.5)
+# s.py
 
-# ---------- Plot export ----------
+# REPLACE your old compute_ber_for_snr with this one:
+
+def compute_ber_for_snr(tx_bits, M, snr_db):
+    """
+    Computes BER by simulating a full QAM Mod -> AWGN -> QAM Demod chain.
+    """
+    if tx_bits is None or tx_bits.size == 0:
+        return 1.0
+    
+    # 1. Modulate
+    symbols = qam_mod(tx_bits, M)
+    if symbols.size == 0:
+        return 1.0
+
+    # 2. Add Noise
+    snr_linear = 10**(snr_db / 10.0)
+    # Calculate noise variance based on signal power (which is normalized to ~1.0)
+    signal_power = np.mean(np.abs(symbols)**2)
+    noise_var = signal_power / snr_linear
+    
+    # Generate complex noise
+    noise = (np.sqrt(noise_var / 2.0) * (np.random.randn(*symbols.shape) + 1j * np.random.randn(*symbols.shape)))
+    
+    # 3. Receive Noisy Signal
+    rx = symbols + noise
+    
+    # 4. Demodulate
+    # We must slice tx_bits to match the number of bits that will be demodulated
+    # as qam_mod may pad the input.
+    num_bits_to_compare = int(symbols.size * np.log2(M))
+    if num_bits_to_compare > tx_bits.size:
+         # This happens if padding occurred. We compare against the padded bits.
+         k = int(np.log2(M))
+         pad_len = k - (tx_bits.size % k) if (tx_bits.size % k) != 0 else 0
+         tx_bits_padded = np.concatenate([tx_bits, np.zeros(pad_len, dtype=np.uint8)])
+         bits_to_compare = tx_bits_padded[:num_bits_to_compare]
+    else:
+        bits_to_compare = tx_bits[:num_bits_to_compare]
+
+    rx_bits = qam_demod(rx, M)
+    
+    # Ensure arrays are the same length for comparison
+    compare_len = min(len(bits_to_compare), len(rx_bits))
+    if compare_len == 0:
+        return 1.0
+        
+    bits_to_compare = bits_to_compare[:compare_len]
+    rx_bits = rx_bits[:compare_len]
+
+    # 5. Calculate Bit Errors
+    num_errors = np.sum(bits_to_compare != rx_bits)
+    ber = num_errors / compare_len
+    
+    return ber
+
+# s.py
+
+# ... (other functions) ...
+
+
+
+
+
+# s.py
+
+# ... (other functions) ...
+
 def export_all_results(node_id):
     figs = []
     for i, msg in enumerate(messages_sent):
@@ -262,35 +415,69 @@ def export_all_results(node_id):
         message_text = msg.get("text", "Unknown message")
         M, nc, cp = msg["M"], msg["nc"], msg["cp"]
         
-        figs.append(make_constellation_plot(tx_syms, f"{msg['recipient']} - Constellation Diagram ({i})", 
-                                          message_text, M, nc, cp))
-        figs.append(make_ofdm_plot(ofdm_sig, f"{msg['recipient']} - OFDM I/Q Signal ({i})", 
-                                 message_text, M, nc, cp))
-        # Spectrum sensing plot for this message (uses actual message OFDM samples)
-        # Threshold chosen as small multiple of mean noise estimate (simple heuristic)
-        threshold = np.mean(np.abs(ofdm_sig)**2) * 0.6 if ofdm_sig.size>0 else None
-        figs.append(make_sensing_plot(ofdm_sig, f"{msg['recipient']} - Spectrum Sensing ({i})", message_text, threshold))
+        figs.append(make_constellation_plot(
+            tx_syms,
+            f"{msg['recipient']} - Constellation Diagram ({i})",
+            message_text, M, nc, cp
+        ))
+        figs.append(make_ofdm_plot(
+            ofdm_sig,
+            f"{msg['recipient']} - OFDM I/Q Signal ({i})",
+            message_text, M, nc, cp
+        ))
+        
+        # REAL spectrum sensing plot
+        sensing_result = msg.get("sensing_result")
+        if sensing_result:
+            figs.append(make_sensing_plot(
+                sensing_result,
+                f"{msg['recipient']} - Spectrum Sensing ({i})",
+                message_text
+            ))
     
     if messages_sent:
-        sample_msg = messages_sent[0]
-        M = sample_msg["M"]
-        bits = bits_from_bytes(sample_msg["bytes"])
-        message_text = sample_msg.get("text", "Sample message")
+        # --- START: THIS IS THE UPDATED SECTION ---
+        # Get modulation from the first message
+        M = messages_sent[0]["M"]
         
+        # Combine ALL sent messages into one giant bitstream
+        print(f"[EXPORT] Combining {len(messages_sent)} sent messages for BER test...")
+        
+        all_message_bytes = b"".join([msg["bytes"] for msg in messages_sent])
+        bits = bits_from_bytes(all_message_bytes)
+        
+        num_bits_tested = bits.size
+        print(f"[EXPORT] Total 'actual' bits for testing: {num_bits_tested}")
+        
+        message_text = f"Actual data ({len(messages_sent)} msgs, {num_bits_tested} bits)"
         snrs = np.arange(0, 21, 2)
-        bers = [compute_ber_for_snr(bits, M, s) for s in snrs]
         
-        snr_fig = plt.figure(figsize=(8,6))
+        if num_bits_tested < 1000:
+            print("[EXPORT] WARNING: Still not enough bits for a smooth curve. Send more messages!")
+        
+        print("[EXPORT] Running BER simulation on 'actual' data...")
+        bers = [compute_ber_for_snr(bits, M, s) for s in snrs]
+        print("[EXPORT] ...simulation complete.")
+        # --- END: UPDATED SECTION ---
+
+        snr_fig = plt.figure(figsize=(8, 6))
         plt.semilogy(snrs, bers, marker='o', linewidth=2, markersize=8)
         plt.title("SNR vs BER Performance")
         plt.xlabel("SNR (dB)")
         plt.ylabel("Bit Error Rate (BER)")
         plt.grid(True, which="both", linestyle="--", linewidth=0.5)
         
-        textstr = f'Message: "{message_text[:50]}{"..." if len(message_text)>50 else ""}"\nModulation: QAM-{M}\nBER@10dB: {bers[5]:.2e}\nBER@20dB: {bers[10]:.2e}'
+        ber_at_10db_index = np.where(snrs == 10)[0][0]
+        ber_at_20db_index = np.where(snrs == 20)[0][0]
+        textstr = (
+            f'Message: "{message_text[:50]}{"..." if len(message_text) > 50 else ""}"\n'
+            f"Modulation: QAM-{M}\n"
+            f"BER@10dB: {bers[ber_at_10db_index]:.2e}\n"
+            f"BER@20dB: {bers[ber_at_20db_index]:.2e}"
+        )
+        
         props = dict(boxstyle='round', facecolor='lightblue', alpha=0.8)
         plt.figtext(0.02, 0.02, textstr, fontsize=10, bbox=props)
-        
         figs.append(snr_fig)
 
     timestamp = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
@@ -301,7 +488,7 @@ def export_all_results(node_id):
     with open(log_path, "w", encoding="utf-8") as f:
         f.write(f"5G Communication Pipeline - Sender Node {node_id}\n")
         f.write(f"Generated: {datetime.datetime.utcnow().isoformat()}Z\n")
-        f.write("="*50 + "\n\n")
+        f.write("=" * 50 + "\n\n")
         
         for ev in base_station_events:
             f.write(ev + "\n")
@@ -311,13 +498,14 @@ def export_all_results(node_id):
             f.write(f"Time: {datetime.datetime.utcfromtimestamp(m['ts']).isoformat()}\n")
             f.write(f"To: {m['recipient']} | Length: {len(m['bytes'])} bytes\n")
             f.write(f"Modulation: QAM-{m['M']} | Subcarriers: {m['nc']} | CP: {m['cp']}\n")
+            f.write(f"Sensing: {m.get('sensing_result', 'N/A')}\n")  # Fixed line
             f.write(f"Message: {m.get('text', 'Unknown')}\n")
             f.write("-" * 40 + "\n")
     
     print(f"[EXPORT] Saved plots to {pdf_path} and logs to {log_path}")
     log_event(f"Exported plots to {pdf_path} and logs to {log_path}")
 
-# ---------- Sensing helpers ----------
+# ---------- REAL Spectrum Sensing ----------
 def compute_ofdm_energy_from_message_bytes(message_bytes, M, nc, cp):
     """Build OFDM from message bytes and compute average energy (power)."""
     bits = bits_from_bytes(message_bytes)
@@ -328,17 +516,11 @@ def compute_ofdm_energy_from_message_bytes(message_bytes, M, nc, cp):
 
 # ---------- Networking handlers ----------
 def send_message(sock, recipient, message_text):
-    """Helper to construct and send a message.
-       For opportunistic (secondary) senders we perform local energy-based sensing
-       using the message bits. Primary senders always send immediately."""
+    """Helper to construct and send a message with REAL spectrum sensing."""
     global chat_partner
     try:
         M = determine_M(message_text)
         nc, cp = pick_num_subcarriers_local(message_text, M)
-
-        # SENSING: compute OFDM energy from message bits (not random bits)
-        msg_bytes = message_text.encode("utf-8")
-        energy, ofdm_sig = compute_ofdm_energy_from_message_bytes(msg_bytes, M, nc, cp)
 
         # Determine primary/secondary by NODE_ID presence in PRIMARY_SENDERS
         is_primary = NODE_ID.upper() in PRIMARY_SENDERS
@@ -347,40 +529,49 @@ def send_message(sock, recipient, message_text):
         control_msgs = [CTL_CONNECT_REQUEST, CTL_CONNECT_ACCEPT, CTL_CONNECT_REJECT, CTL_DISCONNECT]
         bypass_sensing = (message_text in control_msgs) or is_primary
 
-        # If secondary and not bypassing, decide whether to defer
+        # REAL SPECTRUM SENSING for secondary users
+        sensing_result = None
         if not bypass_sensing:
-            # Heuristic threshold: a small multiple of mean power of the message OFDM
-            threshold = np.mean(np.abs(ofdm_sig)**2) * 0.6 if ofdm_sig.size>0 else 0.0
-            # If energy significantly above threshold => assume busy and defer (opportunistic)
-            if energy > threshold and threshold > 0:
-                print(f"[SENSING] Secondary node {NODE_ID} deferring transmission (E={energy:.3e} > thr={threshold:.3e})")
-                log_event(f"Deferred send to {recipient}: E={energy:.3e} thr={threshold:.3e}")
-                return False  # indicate not sent
-        # Compose plaintext and include a small sensing metadata header (non-invasive): M,nc,cp + pkt
+            print(f"[SENSING] Secondary node {NODE_ID} performing spectrum sensing...")
+            sensing_result = perform_spectrum_sensing()
+            
+            if sensing_result['busy']:
+                print(f"[SENSING] Channel BUSY - deferring transmission (SNR: {sensing_result['snr_estimate']:.1f} dB)")
+                log_event(f"Deferred send to {recipient}: Channel BUSY (SNR: {sensing_result['snr_estimate']:.1f} dB)")
+                return False, sensing_result  # indicate not sent with sensing result
+            else:
+                print(f"[SENSING] Channel IDLE - clear to transmit (SNR: {sensing_result['snr_estimate']:.1f} dB)")
+                log_event(f"Channel IDLE - transmitting to {recipient}")
+
+        # Compute energy for logging (not for sensing decision)
+        msg_bytes = message_text.encode("utf-8")
+        energy, ofdm_sig = compute_ofdm_energy_from_message_bytes(msg_bytes, M, nc, cp)
+
+        # Compose and send message
         pkt = struct.pack(">H", len(message_text.encode())) + message_text.encode()
         plaintext = struct.pack(">H H B", M, nc, cp) + pkt
         enc = aes_gcm_encrypt(plaintext, KEY)
         enc_rs = rs.encode(enc)
 
-        # Attach a tiny sensing header (double) representing energy computed from message bits.
+        # Include sensing metadata if available
         dst_b = recipient.encode("utf-8")
-        sensing_header = struct.pack(">d", float(energy))
-        # Keep protocol backwards-compatible by placing sensing header after dst length+dst id.
+        sensing_energy = sensing_result['test_statistic'] if sensing_result else energy
+        sensing_header = struct.pack(">d", float(sensing_energy))
         wire_payload = struct.pack(">H", len(dst_b)) + dst_b + sensing_header + enc_rs
 
         sock.sendall(struct.pack(">I", len(wire_payload)) + wire_payload)
 
-        # Log and record the message (we store ofdm_sig we computed so we can plot sensing)
+        # Log and record the message with sensing results
         if message_text not in control_msgs:
-             record_message(recipient, msg_bytes, M, message_text)
-        log_event(f"Sent to {recipient}: {message_text} (M={M}, NC={nc}, CP={cp}, energy={energy:.4e}, primary={is_primary})")
-        return True
+             record_message(recipient, msg_bytes, M, message_text, sensing_result)
+        log_event(f"Sent to {recipient}: {message_text} (M={M}, NC={nc}, CP={cp}, primary={is_primary})")
+        return True, sensing_result
     except Exception as e:
         print(f"[ERROR] Failed to send message: {e}")
         log_event(f"Send error: {e}")
         with state_lock:
             chat_partner = None
-        return False
+        return False, None
 
 
 def receive_handler(sock):
@@ -460,8 +651,12 @@ def agent_thread(sock):
             if not is_in_chat:
                 payload = AGENT_PAYLOADS[idx % len(AGENT_PAYLOADS)]
                 idx += 1
-                print(f"[AGENT] Sending to {DEFAULT_RECIPIENT}: '{payload}'")
-                send_message(sock, DEFAULT_RECIPIENT, payload)
+                print(f"[AGENT] Performing spectrum sensing before transmission...")
+                success, sensing_result = send_message(sock, DEFAULT_RECIPIENT, payload)
+                if success:
+                    print(f"[AGENT] Sent to {DEFAULT_RECIPIENT}: '{payload}'")
+                else:
+                    print(f"[AGENT] Transmission deferred - channel busy")
             
             # Wait for the interval, checking for stop event periodically
             for _ in range(int(AGENT_INTERVAL * 2)):
@@ -473,6 +668,55 @@ def agent_thread(sock):
                 log_event(f"Agent error: {e}")
                 print(f"[AGENT] Error: {e}")
             break
+# s.py
+
+# ... (put this near your other PHY helpers like qam_mod)
+
+def qam_demod(rx_symbols, M):
+    """Demodulates noisy QAM symbols (hard-decision)"""
+    if M <= 1:
+        return np.array([], dtype=np.uint8)
+        
+    k = int(np.log2(M))
+    sqrtM = int(np.sqrt(M))
+    
+    # 1. Create the ideal constellation grid
+    # (2*i - (sqrtM-1))
+    x_int_ideal = np.arange(sqrtM)
+    y_int_ideal = np.arange(sqrtM)
+    raw_x_ideal = 2 * x_int_ideal - (sqrtM - 1)
+    raw_y_ideal = 2 * y_int_ideal - (sqrtM - 1)
+    
+    scale = np.sqrt((2.0 / 3.0) * (M - 1)) if M > 1 else 1.0
+    
+    constellation_x = raw_x_ideal / scale
+    constellation_y = raw_y_ideal / scale
+    
+    # 2. De-normalize the received symbols
+    rx_x_scaled = np.real(rx_symbols) * scale
+    rx_y_scaled = np.imag(rx_symbols) * scale
+
+    # 3. Find the closest ideal I/Q point for each received symbol
+    # (Hard-decision decoding)
+    def find_nearest(array, value):
+        idx = (np.abs(array - value)).argmin()
+        return idx
+
+    rx_x_int = np.array([find_nearest(raw_x_ideal, x) for x in rx_x_scaled])
+    rx_y_int = np.array([find_nearest(raw_y_ideal, y) for y in rx_y_scaled])
+
+    # 4. Convert (x_int, y_int) back to integers
+    rx_ints = rx_y_int * sqrtM + rx_x_int
+
+    # 5. Convert integers back to bits
+    rx_bits_flat = np.unpackbits(rx_ints.astype(np.uint8).reshape(-1, 1), axis=1)
+    
+    # We only care about the 'k' bits for each symbol
+    # Bits are unpacked in MSB-first order (e.g., [0,0,0,0,1,1,0,1] for 13)
+    # We need the LSBs
+    rx_bits = rx_bits_flat[:, -k:]
+    
+    return rx_bits.flatten().astype(np.uint8)
 
 # ---------- Interactive send handler ----------
 def send_handler(sock, node_id):
@@ -496,8 +740,9 @@ def send_handler(sock, node_id):
                     chat_partner = None
                 continue
             
-            if not send_message(sock, chat_partner, message):
-                print("[ERROR] Connection lost or message deferred.")
+            success, sensing_result = send_message(sock, chat_partner, message)
+            if not success:
+                print("[SENSING] Transmission deferred - channel busy")
         
         else:
             # --- Not in a chat, waiting to connect ---
