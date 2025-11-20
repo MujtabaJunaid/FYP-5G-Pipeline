@@ -87,12 +87,55 @@ KEY = hashlib.sha256(PASSPHRASE).digest()
 rs = RSCodec(40)
 
 # ---------- Primary list ----------
-PRIMARY_SENDERS = ["JAZZ", "UFONE", "TELENOR", "WARID", "STARLINK", "ZONG", "SCO", "PTCL"]
+# Mapping based on ID ranges:
+# S1-S10: JAZZ, S11-S20: WARID, S21-S30: UFONE, S31-S40: TELENOR, S41-S50: ZONG
+# S51-S60: SECONDARY (Opportunistic)
+
+def get_node_type(node_id):
+    """Returns (is_primary, operator_name) based on ID range."""
+    if not node_id or not node_id.startswith("S"):
+        return False, "UNKNOWN"
+    try:
+        num = int(node_id[1:])
+        if 1 <= num <= 10: return True, "JAZZ"
+        if 11 <= num <= 20: return True, "WARID"
+        if 21 <= num <= 30: return True, "UFONE"
+        if 31 <= num <= 40: return True, "TELENOR"
+        if 41 <= num <= 50: return True, "ZONG"
+        if 51 <= num <= 60: return False, "SECONDARY"
+    except ValueError:
+        pass
+    return False, "UNKNOWN"
 
 # ---------- Sensing state ----------
 ENERGY_HISTORY = []  # list of (ts, src_id, energy)
 LAST_PRIMARY_ACTIVITY = 0.0
 PRIMARY_PROTECTION_WINDOW = 10.0  # seconds; after a primary transmission, protect channel for this many seconds
+CHANNEL_STATE_FILE = f"channel_state_{BS_ID}.json"
+
+def channel_monitor_loop():
+    """Continuously updates the channel state file based on primary activity."""
+    print(f"[BS {BS_ID}] Starting channel state monitor -> {CHANNEL_STATE_FILE}")
+    while not STOP.is_set():
+        # Determine if channel is busy based on protection window
+        time_since_primary = time.time() - LAST_PRIMARY_ACTIVITY
+        is_busy = time_since_primary < PRIMARY_PROTECTION_WINDOW
+        
+        state = {
+            "status": "BUSY" if is_busy else "IDLE",
+            "last_primary_ts": LAST_PRIMARY_ACTIVITY,
+            "bs_id": BS_ID,
+            "timestamp": time.time(),
+            "energy_level": 0.9 if is_busy else 0.1
+        }
+        
+        try:
+            with open(CHANNEL_STATE_FILE, "w") as f:
+                json.dump(state, f)
+        except Exception as e:
+            print(f"[BS {BS_ID}] Error writing channel state: {e}")
+            
+        time.sleep(0.5)
 
 def distance(a, b):
     return math.hypot(a[0]-b[0], a[1]-b[1])
@@ -154,66 +197,103 @@ def compute_energy_from_plaintext(plaintext):
     except Exception:
         return 0.0, np.array([]), 16, 64, 8, "<decode_error>"
 
-def process_incoming_frame(src_id, dst_id, encoded_bytes, hop_count=0):
-    """Process a frame incoming from a local client. This function now:
-       - tries to RS-decode & AES-decrypt the payload to access plaintext (for sensing)
-       - computes message OFDM energy (from message bits)
-       - updates energy history and primary activity timestamp
-       - if sender is secondary and primary activity recent -> queue the message
-       - otherwise attempt local delivery or hop to neighbor
+def process_incoming_frame(src_id, dst_id, raw_payload_after_dst, hop_count=0):
     """
-    # Attempt to parse a sensing header if present (we expect senders put an 8-byte energy after dst id, before RS)
-    # encoded_bytes starts at the first byte after destination id in the original payload.
-    # We'll try to extract the first 8 bytes as a double if it's present and plausible. But encoded_bytes could be RS encoded.
-    # Safer approach: try to RS.decode then AES decrypt to get plaintext and compute energy based on message bits.
+    Process a frame incoming from a local client.
+    raw_payload_after_dst is the exact bytes received after destination ID (this MAY include an
+    optional 8-byte sensing header followed by RS-coded bytes, or it may be just the RS-coded bytes).
+    This function:
+      - tries to detect and use optional sensing header
+      - tries RS-decode/AES-decrypt for BS-side sensing computation (best-effort)
+      - updates energy history and primary activity timestamp
+      - if sender is secondary and primary was active recently -> queue
+      - otherwise attempt local delivery or hop to neighbor
+    """
+    # Immediately log raw receipt so we always have a BS-side record
     try:
-        rs_decoded = rs.decode(encoded_bytes)[0]
-        plaintext = aes_gcm_decrypt(rs_decoded, KEY)
+        print(f"[BS {BS_ID}] Raw frame received: src={src_id} dst={dst_id} len={len(raw_payload_after_dst)} bytes")
     except Exception:
-        # Can't decode/decrypt — fallback: treat as unknown energy 0 and forward as before
-        plaintext = None
+        print(f"[BS {BS_ID}] Raw frame received (src/dst len logging failed)")
+
+    encoded_bytes_with_possible_header = raw_payload_after_dst
 
     energy = 0.0
     ofdm_sig = np.array([])
     M = 16; nc = 64; cp = 8; msg_text = "<unknown>"
+    sensing_header_present = False
+    parsed_plaintext = None
 
-    if plaintext is not None:
-        energy, ofdm_sig, M, nc, cp, msg_text = compute_energy_from_plaintext(plaintext)
-        # update global energy history
-        ENERGY_HISTORY.append((time.time(), src_id, energy))
-        # if src is primary, update LAST_PRIMARY_ACTIVITY
-        if src_id.upper() in PRIMARY_SENDERS:
-            global LAST_PRIMARY_ACTIVITY
+    # Try Path A: if there are at least 8 bytes, interpret first 8 as sensing header, then RS-decode remainder
+    if len(encoded_bytes_with_possible_header) >= 8:
+        possible_hdr = encoded_bytes_with_possible_header[:8]
+        remainder = encoded_bytes_with_possible_header[8:]
+        try:
+            sensing_energy_tmp = struct.unpack(">d", possible_hdr)[0]
+            rs_decoded = rs.decode(remainder)[0]
+            plaintext = aes_gcm_decrypt(rs_decoded, KEY)
+            sensing_header_present = True
+            parsed_plaintext = plaintext
+            energy = float(sensing_energy_tmp)
+            try:
+                _energy, _ofdm_sig, M, nc, cp, msg_text = compute_energy_from_plaintext(plaintext)
+                if _ofdm_sig.size > 0:
+                    ofdm_sig = _ofdm_sig
+                    energy = _energy
+            except Exception:
+                pass
+        except Exception:
+            parsed_plaintext = None
+            sensing_header_present = False
+
+    # Path B: if Path A failed or not attempted, try RS-decode full buffer
+    if parsed_plaintext is None:
+        try:
+            rs_decoded = rs.decode(encoded_bytes_with_possible_header)[0]
+            plaintext = aes_gcm_decrypt(rs_decoded, KEY)
+            parsed_plaintext = plaintext
+            energy, ofdm_sig, M, nc, cp, msg_text = compute_energy_from_plaintext(plaintext)
+        except Exception:
+            parsed_plaintext = None
+
+    # If we have any energy measurement (either from header or from computed plaintext) -> record it
+    try:
+        ENERGY_HISTORY.append((time.time(), src_id, float(energy)))
+    except Exception:
+        pass
+
+    is_primary_sender, op_name = get_node_type(src_id)
+
+    # If plaintext was obtained, update LAST_PRIMARY_ACTIVITY for primary senders
+    if parsed_plaintext is not None and is_primary_sender:
+        global LAST_PRIMARY_ACTIVITY
+        LAST_PRIMARY_ACTIVITY = time.time()
+        log_msg = f"Primary TX detected from {src_id} ({op_name}), energy={energy:.4e}"
+        print(f"[BS {BS_ID}] {log_msg}")
+        with stats_lock:
+            stats.setdefault("primary_events", 0)
+            stats["primary_events"] += 1
+    else:
+        if is_primary_sender:
             LAST_PRIMARY_ACTIVITY = time.time()
-            log_msg = f"Primary TX detected from {src_id}, energy={energy:.4e}"
-            print(f"[BS {BS_ID}] {log_msg}")
-            with stats_lock:
-                stats.setdefault("primary_events", 0)
-                stats["primary_events"] += 1
-        else:
-            # log secondary energy
-            print(f"[BS {BS_ID}] Secondary TX from {src_id}, energy={energy:.4e}")
+            print(f"[BS {BS_ID}] Primary sender activity noted (no plaintext), src={src_id} ({op_name})")
 
     # Enforce priority: if this sender is secondary and a primary was active recently, queue
-    is_primary_sender = (src_id.upper() in PRIMARY_SENDERS)
     now = time.time()
     if (not is_primary_sender) and (now - LAST_PRIMARY_ACTIVITY) < PRIMARY_PROTECTION_WINDOW:
-        # queue the message for retry rather than forwarding now
         print(f"[BS {BS_ID}] Queuing secondary message from {src_id} (recent primary activity).")
         with stats_lock:
             stats["queued"] += 1
-        item = {"src_id": src_id, "dst_id": dst_id, "payload": encoded_bytes, "hop_count": hop_count, "ts": time.time()}
+        item = {"src_id": src_id, "dst_id": dst_id, "payload": encoded_bytes_with_possible_header, "hop_count": hop_count, "ts": time.time()}
         with retry_queue_lock:
             retry_queue.append(item)
         return
 
-    # If we reach here, we attempt immediate delivery
+    # Attempt immediate delivery (forward EXACT payload as received after dst id, preserving sensing header if any)
     with clients_lock:
         dst_info = clients.get(dst_id)
     if dst_info and distance(BS_POS, dst_info.get("pos", (0,0))) <= COMM_RANGE:
-        # Prepend the source ID so the client knows who sent the message.
         src_bytes = src_id.encode("utf-8")
-        payload = struct.pack(">H", len(src_bytes)) + src_bytes + encoded_bytes
+        payload = struct.pack(">H", len(src_bytes)) + src_bytes + encoded_bytes_with_possible_header
         wire_frame = struct.pack(">I", len(payload)) + payload
 
         if send_all_with_retry(dst_info["conn"], wire_frame):
@@ -222,12 +302,14 @@ def process_incoming_frame(src_id, dst_id, encoded_bytes, hop_count=0):
                 stats["forwarded_local"] += 1; stats["delivered"] += 1
                 stats["per_hop_counts"].append(hop_count)
             return
+        else:
+            print(f"[BS {BS_ID}] Failed to deliver locally to {dst_id}, will attempt hop/queue.")
 
     # Not local or couldn't deliver: hop to neighbor(s)
     src_bytes, dst_bytes = src_id.encode("utf-8"), dst_id.encode("utf-8")
     hop_payload = (struct.pack(">B", hop_count + 1) +
                    struct.pack(">H", len(src_bytes)) + src_bytes +
-                   struct.pack(">H", len(dst_bytes)) + dst_bytes + encoded_bytes)
+                   struct.pack(">H", len(dst_bytes)) + dst_bytes + encoded_bytes_with_possible_header)
     hop_wire = struct.pack(">I", len(hop_payload)) + hop_payload
     
     forwarded = False
@@ -244,7 +326,7 @@ def process_incoming_frame(src_id, dst_id, encoded_bytes, hop_count=0):
     if not forwarded:
         print(f"[BS {BS_ID}] Queued message for {dst_id} (no neighbor available)")
         with stats_lock: stats["queued"] += 1
-        item = {"src_id": src_id, "dst_id": dst_id, "payload": encoded_bytes, "hop_count": hop_count, "ts": time.time()}
+        item = {"src_id": src_id, "dst_id": dst_id, "payload": encoded_bytes_with_possible_header, "hop_count": hop_count, "ts": time.time()}
         with retry_queue_lock: retry_queue.append(item)
 
 def handle_registered_client(conn, addr):
@@ -280,21 +362,15 @@ def handle_registered_client(conn, addr):
             dst_id = payload[2:2+dst_len].decode("utf-8")
             remaining = payload[2+dst_len:]
 
-            # If sender included a sensing header (8 bytes) before RS-coded payload, attempt to extract
-            sensing_energy = None
-            if len(remaining) >= 8:
-                # try unpack double and assume that's sensing header; if it doesn't decode later, it's okay
-                try:
-                    sensing_energy = struct.unpack(">d", remaining[:8])[0]
-                    encoded_bytes = remaining[8:]
-                except Exception:
-                    sensing_energy = None
-                    encoded_bytes = remaining
-            else:
-                encoded_bytes = remaining
+            # Immediate logging of frame receipt (guarantees BS records every frame)
+            try:
+                print(f"[BS {BS_ID}] Received frame from {client_id} -> {dst_id} ({len(remaining)} bytes after dst id)")
+            except Exception:
+                pass
 
             with stats_lock: stats["received"] += 1
-            threading.Thread(target=process_incoming_frame, args=(client_id, dst_id, encoded_bytes), daemon=True).start()
+            # Pass the entire remaining bytes (including header if present) to process_incoming_frame
+            threading.Thread(target=process_incoming_frame, args=(client_id, dst_id, remaining), daemon=True).start()
 
     except (ConnectionError, ConnectionResetError, struct.error, json.JSONDecodeError):
         pass
@@ -374,7 +450,8 @@ def export_report():
             plt.plot(ts - ts[0], energies, marker='o', linewidth=1)
             # Shade regions where primary activity recorded within protection window
             for i,(t, src, en) in enumerate(ENERGY_HISTORY):
-                if src.upper() in PRIMARY_SENDERS:
+                is_prim, _ = get_node_type(src)
+                if is_prim:
                     # shade a rectangle for protection window
                     start = t - ts[0] - 0.1
                     end = start + PRIMARY_PROTECTION_WINDOW
@@ -406,6 +483,8 @@ def export_report():
 def main():
     # start retry worker
     threading.Thread(target=retry_worker, daemon=True).start()
+    # Start the channel monitor thread
+    threading.Thread(target=channel_monitor_loop, daemon=True).start()
     try:
         accept_loop()
     except KeyboardInterrupt:

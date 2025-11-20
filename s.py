@@ -21,8 +21,25 @@ BS2_HOST, BS2_PORT = "127.0.0.1", 50051
 
 # ---------- Primary / Secondary setup ----------
 # Primary operators get strict priority. Others are opportunistic.
-PRIMARY_SENDERS = ["JAZZ", "UFONE", "TELENOR", "WARID", "STARLINK", "ZONG", "SCO", "PTCL"]
-# Treat any sender ID not in PRIMARY_SENDERS as secondary (opportunistic)
+# Mapping based on ID ranges:
+# S1-S10: JAZZ, S11-S20: WARID, S21-S30: UFONE, S31-S40: TELENOR, S41-S50: ZONG
+# S51-S60: SECONDARY (Opportunistic)
+
+def get_node_type(node_id):
+    """Returns (is_primary, operator_name) based on ID range."""
+    if not node_id or not node_id.startswith("S"):
+        return False, "UNKNOWN"
+    try:
+        num = int(node_id[1:])
+        if 1 <= num <= 10: return True, "JAZZ"
+        if 11 <= num <= 20: return True, "WARID"
+        if 21 <= num <= 30: return True, "UFONE"
+        if 31 <= num <= 40: return True, "TELENOR"
+        if 41 <= num <= 50: return True, "ZONG"
+        if 51 <= num <= 60: return False, "SECONDARY"
+    except ValueError:
+        pass
+    return False, "UNKNOWN"
 
 # ---------- AGENT / NODE CONFIG (change if needed) ----------
 NODE_ID = "JAZZ"                      # default ID used when running agent mode
@@ -326,6 +343,27 @@ def compute_ofdm_energy_from_message_bytes(message_bytes, M, nc, cp):
     energy = np.mean(np.abs(ofdm_sig)**2) if ofdm_sig.size>0 else 0.0
     return energy, ofdm_sig
 
+def sense_channel_environment():
+    """
+    Simulates spectrum sensing by reading channel state files from Base Stations.
+    Returns True if channel is BUSY, False if IDLE.
+    """
+    # Check for any channel state file in the current directory
+    state_files = glob.glob("channel_state_BS*.json")
+    
+    for fname in state_files:
+        try:
+            with open(fname, "r") as f:
+                data = json.load(f)
+                # Only consider fresh data (within last 2 seconds)
+                if time.time() - data.get("timestamp", 0) < 2.0:
+                    if data.get("status") == "BUSY":
+                        # If ANY base station says busy, the spectrum is busy
+                        return True
+        except Exception:
+            pass
+    return False
+
 # ---------- Networking handlers ----------
 def send_message(sock, recipient, message_text):
     """Helper to construct and send a message.
@@ -333,6 +371,34 @@ def send_message(sock, recipient, message_text):
        using the message bits. Primary senders always send immediately."""
     global chat_partner
     try:
+        # Determine primary/secondary by NODE_ID range
+        is_primary, op_name = get_node_type(NODE_ID)
+
+        # 1. Spectrum Sensing (Listen Before Talk)
+        # Only Secondary users need to sense. Primary users (JAZZ, etc.) just transmit.
+        # Control messages bypass sensing (always send)
+        control_msgs = [CTL_CONNECT_REQUEST, CTL_CONNECT_ACCEPT, CTL_CONNECT_REJECT, CTL_DISCONNECT]
+        bypass_sensing = (message_text in control_msgs) or is_primary
+
+        if not bypass_sensing:
+            print(f"[{NODE_ID}] Sensing spectrum...")
+            if sense_channel_environment():
+                print(f"[{NODE_ID}] Channel is BUSY (Primary User Active). Initiating Backoff...")
+                
+                # Simple Backoff Strategy: Wait and Retry
+                for i in range(3):
+                    wait_time = 2.0
+                    print(f"[{NODE_ID}] Waiting {wait_time}s (Attempt {i+1}/3)...")
+                    time.sleep(wait_time)
+                    if not sense_channel_environment():
+                        print(f"[{NODE_ID}] Channel became IDLE. Proceeding.")
+                        break
+                else:
+                    print(f"[{NODE_ID}] Channel still BUSY. Transmitting anyway (Collision Risk!) or Dropping.")
+                    # For simulation visualization, we might still send, but log the warning.
+            else:
+                print(f"[{NODE_ID}] Channel is IDLE. Proceeding.")
+
         M = determine_M(message_text)
         nc, cp = pick_num_subcarriers_local(message_text, M)
 
@@ -340,22 +406,18 @@ def send_message(sock, recipient, message_text):
         msg_bytes = message_text.encode("utf-8")
         energy, ofdm_sig = compute_ofdm_energy_from_message_bytes(msg_bytes, M, nc, cp)
 
-        # Determine primary/secondary by NODE_ID presence in PRIMARY_SENDERS
-        is_primary = NODE_ID.upper() in PRIMARY_SENDERS
-
-        # Control messages bypass sensing (always send)
-        control_msgs = [CTL_CONNECT_REQUEST, CTL_CONNECT_ACCEPT, CTL_CONNECT_REJECT, CTL_DISCONNECT]
-        bypass_sensing = (message_text in control_msgs) or is_primary
-
         # If secondary and not bypassing, decide whether to defer
         if not bypass_sensing:
             # Heuristic threshold: a small multiple of mean power of the message OFDM
             threshold = np.mean(np.abs(ofdm_sig)**2) * 0.6 if ofdm_sig.size>0 else 0.0
             # If energy significantly above threshold => assume busy and defer (opportunistic)
-            if energy > threshold and threshold > 0:
-                print(f"[SENSING] Secondary node {NODE_ID} deferring transmission (E={energy:.3e} > thr={threshold:.3e})")
-                log_event(f"Deferred send to {recipient}: E={energy:.3e} thr={threshold:.3e}")
-                return False  # indicate not sent
+            # NOTE: We disable this local energy check in favor of the file-based LBT above.
+            # if energy > threshold and threshold > 0:
+            #    print(f"[SENSING] Secondary node {NODE_ID} deferring transmission (E={energy:.3e} > thr={threshold:.3e})")
+            #    log_event(f"Deferred send to {recipient}: E={energy:.3e} thr={threshold:.3e}")
+            #    return False  # indicate not sent
+            pass
+
         # Compose plaintext and include a small sensing metadata header (non-invasive): M,nc,cp + pkt
         pkt = struct.pack(">H", len(message_text.encode())) + message_text.encode()
         plaintext = struct.pack(">H H B", M, nc, cp) + pkt

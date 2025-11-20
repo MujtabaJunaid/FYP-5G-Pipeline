@@ -24,7 +24,27 @@ BS1_HOST, BS1_PORT = "127.0.0.1", 50050
 BS2_HOST, BS2_PORT = "127.0.0.1", 50051
 
 # ---------- Primary / Secondary setup (for logging/awareness) ----------
-PRIMARY_SENDERS = ["JAZZ", "UFONE", "TELENOR", "WARID", "STARLINK", "ZONG", "SCO", "PTCL"]
+# Mapping based on ID ranges:
+# S1-S10: JAZZ, S11-S20: WARID, S21-S30: UFONE, S31-S40: TELENOR, S41-S50: ZONG
+# S51-S60: SECONDARY (Opportunistic)
+
+def get_node_type(node_id):
+    """Returns (is_primary, operator_name) based on ID range."""
+    if not node_id or not node_id.startswith("S"):
+        return False, "UNKNOWN"
+    try:
+        num = int(node_id[1:])
+        if 1 <= num <= 10: return True, "JAZZ"
+        if 11 <= num <= 20: return True, "WARID"
+        if 21 <= num <= 30: return True, "UFONE"
+        if 31 <= num <= 40: return True, "TELENOR"
+        if 41 <= num <= 50: return True, "ZONG"
+        if 51 <= num <= 60: return False, "SECONDARY"
+    except ValueError:
+        pass
+    return False, "UNKNOWN"
+
+NODE_ID = None # Will be set in main
 
 # ---------- Crypto / FEC ----------
 PASSPHRASE = b"very secret passphrase - change this!"
@@ -236,11 +256,53 @@ def compute_ofdm_energy_from_message_bytes(message_bytes, M, nc, cp):
     energy = np.mean(np.abs(ofdm_sig)**2) if ofdm_sig.size>0 else 0.0
     return energy, ofdm_sig
 
+def sense_channel_environment():
+    """
+    Simulates spectrum sensing by reading channel state files from Base Stations.
+    Returns True if channel is BUSY, False if IDLE.
+    """
+    # Check for any channel state file in the current directory
+    state_files = glob.glob("channel_state_BS*.json")
+    
+    for fname in state_files:
+        try:
+            with open(fname, "r") as f:
+                data = json.load(f)
+                # Only consider fresh data (within last 2 seconds)
+                if time.time() - data.get("timestamp", 0) < 2.0:
+                    if data.get("status") == "BUSY":
+                        # If ANY base station says busy, the spectrum is busy
+                        return True
+        except Exception:
+            pass
+    return False
+
 def send_message(sock, recipient, message_text):
     """Helper to construct and send a message.
        Control messages bypass sensing so handshakes succeed."""
     global chat_partner
     try:
+        # 1. Spectrum Sensing (Listen Before Talk)
+        # Only Secondary users need to sense. Primary users (JAZZ, etc.) just transmit.
+        is_primary, op_name = get_node_type(NODE_ID)
+        if NODE_ID and (not is_primary):
+            # Control messages bypass sensing
+            control_msgs = [CTL_CONNECT_REQUEST, CTL_CONNECT_ACCEPT, CTL_CONNECT_REJECT, CTL_DISCONNECT]
+            if message_text not in control_msgs:
+                print(f"[{NODE_ID}] Sensing spectrum...")
+                if sense_channel_environment():
+                    print(f"[{NODE_ID}] Channel is BUSY (Primary User Active). Initiating Backoff...")
+                    # Simple Backoff Strategy: Wait and Retry
+                    for i in range(3):
+                        wait_time = 2.0
+                        print(f"[{NODE_ID}] Waiting {wait_time}s (Attempt {i+1}/3)...")
+                        time.sleep(wait_time)
+                        if not sense_channel_environment():
+                            print(f"[{NODE_ID}] Channel became IDLE. Proceeding.")
+                            break
+                    else:
+                        print(f"[{NODE_ID}] Channel still BUSY. Transmitting anyway (Collision Risk!) or Dropping.")
+
         M = determine_M(message_text)
         nc, cp = pick_num_subcarriers_local(message_text, M)
         msg_bytes = message_text.encode("utf-8")
@@ -393,18 +455,34 @@ def main_loop(sock):
 
             # State: Handling a pending connection request
             if current_request:
+                # Auto-accept if we are already in a chat (or just to simplify testing)
+                # But for now, let's just print the prompt.
+                # To fix the "can't connect while busy" issue:
+                # If user types 'accept', we accept.
+                # If user types 'reject', we reject.
+                # If user types anything else, we ignore.
+                
                 if user_input.lower() == 'accept':
                     send_message(sock, current_request, CTL_CONNECT_ACCEPT)
                     with state_lock:
                         chat_partner = current_request
                         pending_request_from = None
                     print(f"[SUCCESS] Connected with {chat_partner}. You can now chat.")
-                else: # reject on any other input
+                elif user_input.lower() == 'reject':
                     send_message(sock, current_request, CTL_CONNECT_REJECT)
                     with state_lock:
                         pending_request_from = None
                     print("[INFO] Request rejected.")
-            
+                else:
+                    # If user is typing messages to current partner, we should send them!
+                    # But we have a pending request blocking the prompt.
+                    # Let's allow sending messages to current partner even if request is pending.
+                    if current_partner:
+                         if not send_message(sock, current_partner, user_input):
+                            print("[ERROR] Connection lost or send failed.")
+                    else:
+                        print("Please type 'accept' or 'reject' first.")
+
             # State: In an active chat
             elif current_partner:
                 if not send_message(sock, current_partner, user_input):
@@ -492,10 +570,12 @@ def export_all_results(node_id):
 
 # ---------- Main ----------
 def main():
+    global NODE_ID
     node_id = ""
     while not re.match(r"^R([1-9]|[1-5][0-9]|60)$", node_id):
         node_id = input("Enter your Receiver ID (R1-R60): ").strip().upper()
-
+    
+    NODE_ID = node_id
     cleanup_old_files(node_id)
 
     node_num = int(node_id[1:])

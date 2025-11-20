@@ -91,12 +91,55 @@ KEY = hashlib.sha256(PASSPHRASE).digest()
 rs = RSCodec(40)
 
 # ---------- Primary list ----------
-PRIMARY_SENDERS = ["JAZZ", "UFONE", "TELENOR", "WARID", "STARLINK", "ZONG", "SCO", "PTCL"]
+# Mapping based on ID ranges:
+# S1-S10: JAZZ, S11-S20: WARID, S21-S30: UFONE, S31-S40: TELENOR, S41-S50: ZONG
+# S51-S60: SECONDARY (Opportunistic)
+
+def get_node_type(node_id):
+    """Returns (is_primary, operator_name) based on ID range."""
+    if not node_id or not node_id.startswith("S"):
+        return False, "UNKNOWN"
+    try:
+        num = int(node_id[1:])
+        if 1 <= num <= 10: return True, "JAZZ"
+        if 11 <= num <= 20: return True, "WARID"
+        if 21 <= num <= 30: return True, "UFONE"
+        if 31 <= num <= 40: return True, "TELENOR"
+        if 41 <= num <= 50: return True, "ZONG"
+        if 51 <= num <= 60: return False, "SECONDARY"
+    except ValueError:
+        pass
+    return False, "UNKNOWN"
 
 # ---------- Sensing state ----------
 ENERGY_HISTORY = []  # list of (ts, src_id, energy)
 LAST_PRIMARY_ACTIVITY = 0.0
 PRIMARY_PROTECTION_WINDOW = 10.0  # seconds; after a primary transmission, protect channel for this many seconds
+CHANNEL_STATE_FILE = f"channel_state_{BS_ID}.json"
+
+def channel_monitor_loop():
+    """Continuously updates the channel state file based on primary activity."""
+    print(f"[BS {BS_ID}] Starting channel state monitor -> {CHANNEL_STATE_FILE}")
+    while not STOP.is_set():
+        # Determine if channel is busy based on protection window
+        time_since_primary = time.time() - LAST_PRIMARY_ACTIVITY
+        is_busy = time_since_primary < PRIMARY_PROTECTION_WINDOW
+        
+        state = {
+            "status": "BUSY" if is_busy else "IDLE",
+            "last_primary_ts": LAST_PRIMARY_ACTIVITY,
+            "bs_id": BS_ID,
+            "timestamp": time.time(),
+            "energy_level": 0.9 if is_busy else 0.1 # Simulated energy level
+        }
+        
+        try:
+            with open(CHANNEL_STATE_FILE, "w") as f:
+                json.dump(state, f)
+        except Exception as e:
+            print(f"[BS {BS_ID}] Error writing channel state: {e}")
+            
+        time.sleep(0.5) # Update frequency
 
 def distance(a, b):
     return math.hypot(a[0]-b[0], a[1]-b[1])
@@ -228,22 +271,23 @@ def process_incoming_frame(src_id, dst_id, raw_payload_after_dst, hop_count=0):
     except Exception:
         pass
 
+    is_primary_sender, op_name = get_node_type(src_id)
+
     # If plaintext was obtained, update LAST_PRIMARY_ACTIVITY for primary senders
-    if parsed_plaintext is not None and src_id.upper() in PRIMARY_SENDERS:
+    if parsed_plaintext is not None and is_primary_sender:
         global LAST_PRIMARY_ACTIVITY
         LAST_PRIMARY_ACTIVITY = time.time()
-        log_msg = f"Primary TX detected from {src_id}, energy={energy:.4e}"
+        log_msg = f"Primary TX detected from {src_id} ({op_name}), energy={energy:.4e}"
         print(f"[BS {BS_ID}] {log_msg}")
         with stats_lock:
             stats.setdefault("primary_events", 0)
             stats["primary_events"] += 1
     else:
-        if src_id.upper() in PRIMARY_SENDERS:
+        if is_primary_sender:
             LAST_PRIMARY_ACTIVITY = time.time()
-            print(f"[BS {BS_ID}] Primary sender activity noted (no plaintext), src={src_id}")
+            print(f"[BS {BS_ID}] Primary sender activity noted (no plaintext), src={src_id} ({op_name})")
 
     # Enforce priority: if this sender is secondary and a primary was active recently, queue
-    is_primary_sender = (src_id.upper() in PRIMARY_SENDERS)
     now = time.time()
     if (not is_primary_sender) and (now - LAST_PRIMARY_ACTIVITY) < PRIMARY_PROTECTION_WINDOW:
         print(f"[BS {BS_ID}] Queuing secondary message from {src_id} (recent primary activity).")
@@ -420,7 +464,8 @@ def export_report():
             plt.plot(ts - ts[0], energies, marker='o', linewidth=1)
             # Shade regions where primary activity recorded within protection window
             for i,(t, src, en) in enumerate(ENERGY_HISTORY):
-                if src.upper() in PRIMARY_SENDERS:
+                is_prim, _ = get_node_type(src)
+                if is_prim:
                     # shade a rectangle for protection window
                     start = t - ts[0] - 0.1
                     end = start + PRIMARY_PROTECTION_WINDOW
@@ -452,6 +497,8 @@ def export_report():
 def main():
     # start retry worker
     threading.Thread(target=retry_worker, daemon=True).start()
+    # Start the channel monitor thread
+    threading.Thread(target=channel_monitor_loop, daemon=True).start()
     try:
         accept_loop()
     except KeyboardInterrupt:
