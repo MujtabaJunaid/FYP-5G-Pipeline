@@ -55,7 +55,8 @@ plot_lock = threading.Lock()
 
 # --- Session Management ---
 # State variables to manage who we are talking to
-chat_partner = None
+chat_partner = None # The peer we are currently TYPING to (for replies)
+connected_peers = set() # Set of ALL peers we have accepted
 pending_request_from = None
 state_lock = threading.Lock()
 
@@ -395,25 +396,40 @@ def receive_handler(sock):
 
             # --- Handle Control Messages ---
             if msg == CTL_CONNECT_REQUEST:
+                # MODIFICATION: Auto-accept or allow multiple connections
                 with state_lock:
-                    if not chat_partner and not pending_request_from:
-                        pending_request_from = src_id
-                        print(f"\n[!] Connection request from {src_id}. Type 'accept' or 'reject'.\n> ", end="", flush=True)
+                    if src_id not in connected_peers:
+                        print(f"\n[AUTO-ACCEPT] Incoming connection from {src_id}. Accepted.")
+                        connected_peers.add(src_id)
+                        # If we don't have a focus partner, set this one as default for replies
+                        if not chat_partner:
+                            chat_partner = src_id
+                            print(f"[INFO] You are now replying to {chat_partner} by default.")
+                    
+                    # Send accept immediately
+                    send_message(sock, src_id, CTL_CONNECT_ACCEPT)
                 continue
             
             if msg == CTL_DISCONNECT:
                 with state_lock:
+                    if src_id in connected_peers:
+                        connected_peers.remove(src_id)
+                        print(f"\n[INFO] {src_id} disconnected.")
                     if src_id == chat_partner:
-                        print(f"\n[INFO] {chat_partner} has disconnected. You are now idle.\n> ", end="", flush=True)
                         chat_partner = None
+                        # Pick another partner if available
+                        if connected_peers:
+                            chat_partner = next(iter(connected_peers))
+                            print(f"[INFO] Switched reply focus to {chat_partner}")
                 continue
 
             # --- Handle Regular Messages ---
             with state_lock:
-                if src_id == chat_partner:
-                    print(f"\n<<< {src_id}: '{msg}'\n> ", end="", flush=True)
-                    record_message(src_id, msg.encode("utf-8"), M, msg)
-                    log_event(f"Received message from {src_id}: {msg} (M={M}, NC={nc}, CP={cp}, sensing_energy={sensing_energy})")
+                # MODIFICATION: Accept message if sender is in our connected list (or just accept all)
+                # We print it regardless of who we are currently typing to.
+                print(f"\n<<< {src_id}: '{msg}'\n> ", end="", flush=True)
+                record_message(src_id, msg.encode("utf-8"), M, msg)
+                log_event(f"Received message from {src_id}: {msg} (M={M}, NC={nc}, CP={cp}, sensing_energy={sensing_energy})")
             
         except socket.timeout:
             continue
@@ -433,12 +449,10 @@ def main_loop(sock):
             # Determine prompt based on current state
             with state_lock:
                 current_partner = chat_partner
-                current_request = pending_request_from
+                # We no longer block on pending requests since we auto-accept
             
             if current_partner:
-                prompt = f"> "
-            elif current_request:
-                prompt = f"Accept connection from {current_request}? (accept/reject): "
+                prompt = f"To {current_partner}> "
             else:
                 prompt = "Waiting for connections... (type 'exit' to quit): "
             
@@ -448,49 +462,30 @@ def main_loop(sock):
                 continue
 
             if user_input.lower() == 'exit':
-                if current_partner:
-                    send_message(sock, current_partner, CTL_DISCONNECT)
+                # Disconnect from everyone
+                with state_lock:
+                    for peer in list(connected_peers):
+                        send_message(sock, peer, CTL_DISCONNECT)
                 stop_event.set()
                 break
-
-            # State: Handling a pending connection request
-            if current_request:
-                # Auto-accept if we are already in a chat (or just to simplify testing)
-                # But for now, let's just print the prompt.
-                # To fix the "can't connect while busy" issue:
-                # If user types 'accept', we accept.
-                # If user types 'reject', we reject.
-                # If user types anything else, we ignore.
-                
-                if user_input.lower() == 'accept':
-                    send_message(sock, current_request, CTL_CONNECT_ACCEPT)
-                    with state_lock:
-                        chat_partner = current_request
-                        pending_request_from = None
-                    print(f"[SUCCESS] Connected with {chat_partner}. You can now chat.")
-                elif user_input.lower() == 'reject':
-                    send_message(sock, current_request, CTL_CONNECT_REJECT)
-                    with state_lock:
-                        pending_request_from = None
-                    print("[INFO] Request rejected.")
-                else:
-                    # If user is typing messages to current partner, we should send them!
-                    # But we have a pending request blocking the prompt.
-                    # Let's allow sending messages to current partner even if request is pending.
-                    if current_partner:
-                         if not send_message(sock, current_partner, user_input):
-                            print("[ERROR] Connection lost or send failed.")
+            
+            # Switch focus command (optional helper)
+            if user_input.lower().startswith("/switch "):
+                target = user_input.split(" ")[1].upper()
+                with state_lock:
+                    if target in connected_peers:
+                        chat_partner = target
+                        print(f"[INFO] Now replying to {target}")
                     else:
-                        print("Please type 'accept' or 'reject' first.")
+                        print(f"[ERROR] {target} is not connected.")
+                continue
 
             # State: In an active chat
-            elif current_partner:
+            if current_partner:
                 if not send_message(sock, current_partner, user_input):
                     print("[ERROR] Connection lost or send failed.")
-            
-            # State: Idle (input does nothing except 'exit')
             else:
-                pass
+                print("[INFO] No active chat partner to reply to. Wait for connection.")
 
 
         except (EOFError, KeyboardInterrupt):
