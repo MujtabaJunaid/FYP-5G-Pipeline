@@ -32,6 +32,18 @@ import numpy as np
 BS_INSTANCE = 1
 # ---------------------
 
+# ---------- Helpers ----------
+def aes_gcm_encrypt(plaintext, key):
+    nonce = get_random_bytes(12)
+    cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+    ciphertext, tag = cipher.encrypt_and_digest(plaintext)
+    return nonce + tag + ciphertext
+
+def aes_gcm_decrypt(enc_blob, key):
+    nonce, tag, ciphertext = enc_blob[:12], enc_blob[12:28], enc_blob[28:]
+    cipher = AES.new(key, AES.MODE_GCM, nonce=nonce)
+    return cipher.decrypt_and_verify(ciphertext, tag)
+
 RESULTS_DIR = "results"
 os.makedirs(RESULTS_DIR, exist_ok=True)
 
