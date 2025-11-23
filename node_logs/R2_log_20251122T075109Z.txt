@@ -1,0 +1,45 @@
+5G Communication Pipeline - Receiver Node R2
+Generated: 2025-11-22T07:51:11.511178Z
+==================================================
+
+2025-11-22T07:38:46.082182Z Registered R2 to 127.0.0.1:50050
+2025-11-22T07:39:37.736397Z Sent to S51: __CONNECT_ACCEPT__ (M=16, NC=64, CP=8, energy=9.1063e-03)
+2025-11-22T07:41:02.839607Z Received message from S51: Alphabet turtles wear crowns of caramel circuitry, marching through spiral rainbows. Dragonfruit mountains erupt with chocolate confetti as gigabyte clouds drift lazily above. Mushrooms sip binary smoothies from pixel fountains. (M=64, NC=64, CP=8, sensing_energy=0.013275993256329386)
+2025-11-22T07:41:12.343934Z Sent to S51: Tulip skyscrapers blink gently under marshland moonbeams. Neon harmonicas argue with bilingual snowflakes over pillow politics. Bicycles made of peppermint swirl toward glittering apricot horizons. (M=64, NC=32, CP=4, energy=2.7030e-02)
+2025-11-22T07:50:30.227742Z Received message from S51: Cerulean marshes applaud tap-dancing toaster ovens. Libraries of chocolate-coated dictionaries snooze beneath holographic chandeliers. Pepper-flavored horizons cuddle the geometry of peppermint skyscrapers. (M=64, NC=32, CP=4, sensing_energy=0.02588355578530234)
+2025-11-22T07:50:33.535655Z Received message from S51: Cerulean marshes applaud tap-dancing toaster ovens. Libraries of chocolate-coated dictionaries snooze beneath holographic chandeliers. Pepper-flavored horizons cuddle the geometry of peppermint skyscrapers. (M=64, NC=32, CP=4, sensing_energy=0.02588355578530234)
+2025-11-22T07:50:39.818826Z Received message from S51: Alphabet turtles wear crowns of caramel circuitry, marching through spiral rainbows. Dragonfruit mountains erupt with chocolate confetti as gigabyte clouds drift lazily above. Mushrooms sip binary smoothies from pixel fountains. (M=64, NC=64, CP=8, sensing_energy=0.013275993256329386)
+2025-11-22T07:51:02.511614Z Sent to S51: exiy (M=16, NC=32, CP=4, energy=3.5603e-03)
+
+--- Messages Log ---
+Peer: S51
+Time: 2025-11-22T07:41:02.836116
+Length: 228 bytes | Modulation: QAM-64
+Subcarriers: 64 | CP: 8
+Message: Alphabet turtles wear crowns of caramel circuitry, marching through spiral rainbows. Dragonfruit mountains erupt with chocolate confetti as gigabyte clouds drift lazily above. Mushrooms sip binary smoothies from pixel fountains.
+----------------------------------------
+Time: 2025-11-22T07:41:12.343934
+Length: 197 bytes | Modulation: QAM-64
+Subcarriers: 32 | CP: 4
+Message: Tulip skyscrapers blink gently under marshland moonbeams. Neon harmonicas argue with bilingual snowflakes over pillow politics. Bicycles made of peppermint swirl toward glittering apricot horizons.
+----------------------------------------
+Time: 2025-11-22T07:50:30.227742
+Length: 206 bytes | Modulation: QAM-64
+Subcarriers: 32 | CP: 4
+Message: Cerulean marshes applaud tap-dancing toaster ovens. Libraries of chocolate-coated dictionaries snooze beneath holographic chandeliers. Pepper-flavored horizons cuddle the geometry of peppermint skyscrapers.
+----------------------------------------
+Time: 2025-11-22T07:50:33.534239
+Length: 206 bytes | Modulation: QAM-64
+Subcarriers: 32 | CP: 4
+Message: Cerulean marshes applaud tap-dancing toaster ovens. Libraries of chocolate-coated dictionaries snooze beneath holographic chandeliers. Pepper-flavored horizons cuddle the geometry of peppermint skyscrapers.
+----------------------------------------
+Time: 2025-11-22T07:50:39.818826
+Length: 228 bytes | Modulation: QAM-64
+Subcarriers: 64 | CP: 8
+Message: Alphabet turtles wear crowns of caramel circuitry, marching through spiral rainbows. Dragonfruit mountains erupt with chocolate confetti as gigabyte clouds drift lazily above. Mushrooms sip binary smoothies from pixel fountains.
+----------------------------------------
+Time: 2025-11-22T07:51:02.509119
+Length: 4 bytes | Modulation: QAM-16
+Subcarriers: 32 | CP: 4
+Message: exiy
+----------------------------------------

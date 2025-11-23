@@ -1,0 +1,7 @@
+5G Communication Pipeline - Sender Node S14
+Generated: 2025-11-20T21:18:54.778601Z
+==================================================
+
+2025-11-20T21:18:47.478134Z Registered S14 to 127.0.0.1:50050
+
+--- Messages Sent ---

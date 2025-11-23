@@ -343,6 +343,9 @@ def compute_ofdm_energy_from_message_bytes(message_bytes, M, nc, cp):
     energy = np.mean(np.abs(ofdm_sig)**2) if ofdm_sig.size>0 else 0.0
     return energy, ofdm_sig
 
+# SENSING CONFIG
+SENSING_THRESHOLD = 0.4  # Anything above this is considered a Signal
+
 def sense_channel_environment():
     """
     Simulates spectrum sensing by reading channel state files from Base Stations.
@@ -357,9 +360,15 @@ def sense_channel_environment():
                 data = json.load(f)
                 # Only consider fresh data (within last 2 seconds)
                 if time.time() - data.get("timestamp", 0) < 2.0:
-                    if data.get("status") == "BUSY":
-                        # If ANY base station says busy, the spectrum is busy
+                    detected_energy = data.get("energy_level", 0.0)
+                    
+                    # REALISTIC DECISION LOGIC
+                    if detected_energy > SENSING_THRESHOLD:
+                        print(f"[SENSE] Energy {detected_energy:.4f} > Threshold {SENSING_THRESHOLD}. Channel BUSY.")
                         return True
+                    else:
+                        # print(f"[SENSE] Energy {detected_energy:.4f} < Threshold {SENSING_THRESHOLD}. Channel IDLE.")
+                        pass
         except Exception:
             pass
     return False

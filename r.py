@@ -53,6 +53,48 @@ rs = RSCodec(40)
 stop_event = threading.Event()
 plot_lock = threading.Lock()
 
+class ReceiverHardware:
+    def __init__(self, temp_k=290, bandwidth_hz=20e6, noise_figure_db=5):
+        self.k = 1.38e-23
+        self.T = temp_k
+        self.B = bandwidth_hz
+        # Thermal Noise Floor (N) = kTB
+        self.thermal_noise_dbm = 10 * np.log10(self.k * self.T * self.B * 1000) + noise_figure_db
+        print(f"[HARDWARE] Receiver initialized. Noise Floor: {self.thermal_noise_dbm:.2f} dBm")
+
+    def apply_channel_effects(self, clean_bytes, distance_m, tx_power_dbm=23):
+        """
+        Takes perfect bytes from socket, simulates path loss + thermal noise, 
+        and returns potentially corrupted bytes.
+        """
+        # 1. Calculate Received Signal Strength (RSSI) using Free Space Path Loss
+        freq = 3.5e9 # 3.5 GHz
+        c = 3e8
+        fspl_db = 20 * np.log10(distance_m) + 20 * np.log10(freq) - 147.55
+        rssi_dbm = tx_power_dbm - fspl_db
+        
+        # 2. Calculate SNR
+        snr_db = rssi_dbm - self.thermal_noise_dbm
+        
+        # 3. Determine Bit Error Probability based on SNR (QAM approximation)
+        snr_linear = 10**(snr_db/10)
+        if snr_linear < 0.1: p_error = 0.5 # Total garbage
+        else: p_error = 0.2 * np.exp(-0.5 * snr_linear)
+
+        # 4. Corrupt the bytes
+        corrupted_data = bytearray(clean_bytes)
+        
+        # Optimization: Only run the loop if p_error is significant (> 1e-6)
+        if p_error > 1e-6:
+            for i in range(len(corrupted_data)):
+                if random.random() < (p_error * 8): # Approx prob that a byte has an error
+                    bit_mask = 1 << random.randint(0, 7)
+                    corrupted_data[i] ^= bit_mask
+        
+        return bytes(corrupted_data), snr_db, rssi_dbm
+
+rx_hw = ReceiverHardware()
+
 # --- Session Management ---
 # State variables to manage who we are talking to
 chat_partner = None # The peer we are currently TYPING to (for replies)
@@ -355,7 +397,20 @@ def receive_handler(sock):
             src_id = data[2:2+src_len].decode("utf-8")
             pos = 2 + src_len
 
-            enc_blob_candidate = data[pos:]
+            # --- NEW: APPLY PHYSICS ---
+            # We assume a distance for simulation (e.g., 500m or random)
+            dist = random.uniform(50, 800) # Random distance between 50m and 800m
+            
+            raw_payload = data[pos:]
+            
+            # Corrupt the payload based on physics
+            corrupted_payload, snr, rssi = rx_hw.apply_channel_effects(raw_payload, dist)
+            
+            print(f"[PHY] Dist: {dist:.1f}m | RSSI: {rssi:.1f}dBm | SNR: {snr:.1f}dB")
+            
+            enc_blob_candidate = corrupted_payload 
+            # --------------------------
+
             sensing_energy = None
             plaintext = None
 

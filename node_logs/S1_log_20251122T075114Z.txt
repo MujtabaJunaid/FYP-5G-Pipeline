@@ -1,0 +1,34 @@
+5G Communication Pipeline - Sender Node S1
+Generated: 2025-11-22T07:51:15.549291Z
+==================================================
+
+2025-11-22T07:39:08.096368Z Registered S1 to 127.0.0.1:50050
+2025-11-22T07:39:27.295982Z Sent to R1: __CONNECT_REQUEST__ (M=16, NC=64, CP=8, energy=8.1533e-03, primary=False)
+2025-11-22T07:40:50.781759Z Sent to R1: Solar paperclips orbit jelly-shoed comets, while marshmallow ghosts choreograph taffy dances. Crimson typewriters roar like popcorn lions on velvet racetracks. Confused cupcakes whisper ancient riddles to sleepy calculators. (M=64, NC=64, CP=8, energy=1.2916e-02, primary=False)
+2025-11-22T07:41:29.706477Z Received reply from R1: Invisible violinists juggle waffles made of thunder. Paper airplanes debate meteor etiquette while socks conduct symphonies in underwater stadiums. Glitter circuits whir within giggling lanterns.
+2025-11-22T07:50:07.622686Z Sent to R1:  (M=16, NC=128, CP=16, energy=0.0000e+00, primary=False)
+2025-11-22T07:50:19.813182Z Sent to R1: Alphabet turtles wear crowns of caramel circuitry, marching through spiral rainbows. Dragonfruit mountains erupt with chocolate confetti as gigabyte clouds drift lazily above. Mushrooms sip binary smoothies from pixel fountains. (M=64, NC=64, CP=8, energy=1.3276e-02, primary=False)
+2025-11-22T07:50:43.848182Z Sent to R1: Solar paperclips orbit jelly-shoed comets, while marshmallow ghosts choreograph taffy dances. Crimson typewriters roar like popcorn lions on velvet racetracks. Confused cupcakes whisper ancient riddles to sleepy calculators. (M=64, NC=64, CP=8, energy=1.2916e-02, primary=False)
+2025-11-22T07:50:50.875901Z Sent to R1: __DISCONNECT__ (M=16, NC=32, CP=4, energy=2.8364e-02, primary=False)
+
+--- Messages Sent ---
+Time: 2025-11-22T07:40:50.781759
+To: R1 | Length: 224 bytes
+Modulation: QAM-64 | Subcarriers: 64 | CP: 8
+Message: Solar paperclips orbit jelly-shoed comets, while marshmallow ghosts choreograph taffy dances. Crimson typewriters roar like popcorn lions on velvet racetracks. Confused cupcakes whisper ancient riddles to sleepy calculators.
+----------------------------------------
+Time: 2025-11-22T07:50:07.622686
+To: R1 | Length: 0 bytes
+Modulation: QAM-16 | Subcarriers: 128 | CP: 16
+Message: 
+----------------------------------------
+Time: 2025-11-22T07:50:19.813182
+To: R1 | Length: 228 bytes
+Modulation: QAM-64 | Subcarriers: 64 | CP: 8
+Message: Alphabet turtles wear crowns of caramel circuitry, marching through spiral rainbows. Dragonfruit mountains erupt with chocolate confetti as gigabyte clouds drift lazily above. Mushrooms sip binary smoothies from pixel fountains.
+----------------------------------------
+Time: 2025-11-22T07:50:43.848182
+To: R1 | Length: 224 bytes
+Modulation: QAM-64 | Subcarriers: 64 | CP: 8
+Message: Solar paperclips orbit jelly-shoed comets, while marshmallow ghosts choreograph taffy dances. Crimson typewriters roar like popcorn lions on velvet racetracks. Confused cupcakes whisper ancient riddles to sleepy calculators.
+----------------------------------------

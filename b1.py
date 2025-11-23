@@ -15,6 +15,7 @@ import struct
 import time
 import os
 import math
+import random
 from collections import deque
 import matplotlib
 matplotlib.use("Agg")
@@ -117,6 +118,10 @@ LAST_PRIMARY_ACTIVITY = 0.0
 PRIMARY_PROTECTION_WINDOW = 10.0  # seconds; after a primary transmission, protect channel for this many seconds
 CHANNEL_STATE_FILE = f"channel_state_{BS_ID}.json"
 
+# CONFIG for Noise Simulation
+NOISE_FLOOR_AVG = 0.15
+SIGNAL_POWER_AVG = 0.75
+
 def channel_monitor_loop():
     """Continuously updates the channel state file based on primary activity."""
     print(f"[BS {BS_ID}] Starting channel state monitor -> {CHANNEL_STATE_FILE}")
@@ -125,12 +130,28 @@ def channel_monitor_loop():
         time_since_primary = time.time() - LAST_PRIMARY_ACTIVITY
         is_busy = time_since_primary < PRIMARY_PROTECTION_WINDOW
         
+        # CALCULATE ENERGY LEVEL (Physics Simulation)
+        # 1. Always generate background noise (Thermal Noise)
+        # Random fluctuation between 0.13 and 0.17
+        current_noise = random.uniform(NOISE_FLOOR_AVG - 0.02, NOISE_FLOOR_AVG + 0.02)
+        
+        if is_busy:
+            # 2. If Busy, add Signal Power to the Noise
+            # Signal also fluctuates slightly due to fading
+            current_signal = random.uniform(SIGNAL_POWER_AVG - 0.05, SIGNAL_POWER_AVG + 0.05)
+            total_energy = current_noise + current_signal
+            status_text = "BUSY"
+        else:
+            # 3. If Idle, we only see the noise
+            total_energy = current_noise
+            status_text = "IDLE"
+        
         state = {
-            "status": "BUSY" if is_busy else "IDLE",
+            "status": status_text,
             "last_primary_ts": LAST_PRIMARY_ACTIVITY,
             "bs_id": BS_ID,
             "timestamp": time.time(),
-            "energy_level": 0.9 if is_busy else 0.1 # Simulated energy level
+            "energy_level": round(total_energy, 4)
         }
         
         try:
@@ -139,7 +160,7 @@ def channel_monitor_loop():
         except Exception as e:
             print(f"[BS {BS_ID}] Error writing channel state: {e}")
             
-        time.sleep(0.5) # Update frequency
+        time.sleep(0.5)
 
 def distance(a, b):
     return math.hypot(a[0]-b[0], a[1]-b[1])
