@@ -1,0 +1,7 @@
+5G Communication Pipeline - Sender Node S10
+Generated: 2026-01-27T18:18:41.012220Z
+==================================================
+
+2026-01-27T18:17:43.589711Z Registered S10 to 127.0.0.1:50050
+
+--- Messages Sent ---

@@ -1,0 +1,3 @@
+To R1: Hello, It's JAZZ the real Primary User
+To R1: Spectrum sensing is working perfectly fine now
+To R1: Alright, see you man 

@@ -1,453 +1,260 @@
-# base_station.py (updated)
-# - Base station with primary/secondary priority
-# - Energy-based spectrum sensing using actual message bits (BS attempts to decode message to construct bits)
-# - If primary recent activity detected, secondary transmissions will be queued (opportunistic)
-# - Generates PDF report including sensing energy timeline and busy/idle shading
-# Minor fixes:
-#  - Immediately log raw frame receipts so every incoming frame is recorded (even if RS/AES decoding fails)
-#  - Preserve optional 8-byte sensing header when forwarding
-#  - Keep all other functionality unchanged
+# base_station.py (Optimized + Primary Uplink + JAMMING SCENARIO)
+# - Includes Jamming/Interference Simulation
+# - Corrupts packets when Jammer is active
+# - Maintains all existing Primary/Secondary logic
 
-import socket
-import threading
-import json
-import struct
-import time
-import os
-import math
+import socket, threading, json, struct, time, os, math, glob, hashlib, random
 from collections import deque
+from concurrent.futures import ThreadPoolExecutor
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
-import glob
-import hashlib
 from reedsolo import RSCodec
 from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
+from Crypto.Protocol.KDF import PBKDF2
 import numpy as np
 
 # --- CONFIGURATION ---
-# Change this value to 1 or 2 to run as BS1 or BS2
-BS_INSTANCE = 1
+BS_INSTANCE = 1 
 # ---------------------
 
 RESULTS_DIR = "results"
 os.makedirs(RESULTS_DIR, exist_ok=True)
-
 HOST = "127.0.0.1"
 COMM_RANGE = 150.0
 
 if BS_INSTANCE == 1:
-    PORT = 50050
-    BS_ID = "BS1"
-    BS_POS = (0.0, 0.0)
+    PORT = 50050; BS_ID = "BS1"; BS_POS = (0.0, 0.0)
     NEIGHBORS = [("127.0.0.1", 50051)]
-    PDF_PATH = os.path.join(RESULTS_DIR, "base_station_1_report.pdf")
 else:
-    PORT = 50051
-    BS_ID = "BS2"
-    BS_POS = (200.0, 0.0)
+    PORT = 50051; BS_ID = "BS2"; BS_POS = (200.0, 0.0)
     NEIGHBORS = [("127.0.0.1", 50050)]
-    PDF_PATH = os.path.join(RESULTS_DIR, "base_station_2_report.pdf")
 
-def cleanup_old_files():
-    """Delete old base station report files"""
-    pattern = os.path.join(RESULTS_DIR, f"base_station_{BS_INSTANCE}_*")
-    old_files = glob.glob(pattern)
-    for file_path in old_files:
-        try:
-            os.remove(file_path)
-            print(f"[BS {BS_ID}] Removed old file: {file_path}")
-        except Exception as e:
-            print(f"[BS {BS_ID}] Error removing {file_path}: {e}")
+# ---------- Crypto ----------
+PASSPHRASE = b"very secret passphrase - change this!"
+SALT = b'\x00'*16 
+KEY = PBKDF2(PASSPHRASE, SALT, dkLen=32, count=100000)
+rs = RSCodec(40)
 
-# Clean up old files on startup
-cleanup_old_files()
-
+# ---------- State ----------
 clients_lock = threading.Lock()
 clients = {}
 retry_queue = deque()
 retry_queue_lock = threading.Lock()
-stats = { "received": 0, "forwarded_local": 0, "forwarded_remote": 0, "queued": 0, "delivered": 0, "per_hop_counts": [] }
+stats = { "received": 0, "forwarded_local": 0, "forwarded_remote": 0, "queued": 0, "delivered": 0, "jammed": 0 }
 stats_lock = threading.Lock()
 STOP = threading.Event()
 
-# ---------- Crypto & RS (so BS can inspect message bits for sensing) ----------
-PASSPHRASE = b"very secret passphrase - change this!"
-KEY = hashlib.sha256(PASSPHRASE).digest()
-rs = RSCodec(40)
+FRAME_PROCESSOR_POOL = ThreadPoolExecutor(max_workers=10)
 
-# ---------- Primary list ----------
 PRIMARY_SENDERS = ["JAZZ", "UFONE", "TELENOR", "WARID", "STARLINK", "ZONG", "SCO", "PTCL"]
-
-# ---------- Sensing state ----------
-ENERGY_HISTORY = []  # list of (ts, src_id, energy)
+ENERGY_HISTORY = []
 LAST_PRIMARY_ACTIVITY = 0.0
-PRIMARY_PROTECTION_WINDOW = 10.0  # seconds; after a primary transmission, protect channel for this many seconds
+PRIMARY_PROTECTION_WINDOW = 10.0
 
-def distance(a, b):
-    return math.hypot(a[0]-b[0], a[1]-b[1])
+# --- JAMMING STATE ---
+JAMMING_ACTIVE = False
+JAMMING_LAST_SEEN = 0.0
+JAMMING_TIMEOUT = 0.5 # Reset jamming state if no jammer signal for 0.5s
+
+def distance(a, b): return math.hypot(a[0]-b[0], a[1]-b[1])
 
 def recv_full(sock, length):
     data = b""
     while len(data) < length:
         more = sock.recv(length - len(data))
-        if not more: raise ConnectionError("socket closed")
+        if not more: raise ConnectionError("closed")
         data += more
     return data
 
 def send_all_with_retry(conn, data):
-    try:
-        conn.sendall(data)
-        return True
-    except Exception as e:
-        # improved debug on forwarding failure
-        try:
-            peer = conn.getpeername()
-        except Exception:
-            peer = None
-        print(f"[BS {BS_ID}] Forward/send failed to {peer}: {e}")
-        return False
+    try: conn.sendall(data); return True
+    except: return False
 
-# ---------- PHY helpers to rebuild OFDM energy from message bits ----------
-def bits_from_bytes(b: bytes):
-    return np.unpackbits(np.frombuffer(b, dtype=np.uint8))
-
+# PHY Helpers
+def bits_from_bytes(b): return np.unpackbits(np.frombuffer(b, dtype=np.uint8))
 def qam_mod(bits, M):
     k = int(np.log2(M))
-    if len(bits) % k != 0:
-        bits = np.concatenate([bits, np.zeros(k - (len(bits) % k), dtype=np.uint8)])
-    ints = bits.reshape((-1, k)).dot(1 << np.arange(k - 1, -1, -1))
-    sqrtM = int(np.sqrt(M))
-    x_int = ints % sqrtM
-    y_int = ints // sqrtM
-    raw_x = 2 * x_int - (sqrtM - 1)
-    raw_y = 2 * y_int - (sqrtM - 1)
-    scale = np.sqrt((2.0 / 3.0) * (M - 1)) if M > 1 else 1.0
-    return (raw_x / scale) + 1j * (raw_y / scale)
+    if len(bits)%k!=0: bits = np.concatenate([bits, np.zeros(k-(len(bits)%k), dtype=np.uint8)])
+    ints = bits.reshape((-1,k)).dot(1<<np.arange(k-1,-1,-1))
+    scale = np.sqrt((2.0/3.0)*(M-1)) if M>1 else 1.0
+    return ((2*(ints%int(np.sqrt(M)))-(int(np.sqrt(M))-1))/scale) + 1j*((2*(ints//int(np.sqrt(M)))-(int(np.sqrt(M))-1))/scale)
+def ofdm_mod(syms, nc, cp):
+    if len(syms)==0: return np.array([])
+    n = int(np.ceil(len(syms)/nc))
+    padded = np.pad(syms, (0, n*nc-len(syms)))
+    ifft = np.fft.ifft(padded.reshape((n, nc)), axis=1)
+    return np.hstack([ifft[:, -cp:], ifft]).flatten()
 
-def ofdm_mod(symbols, num_subcarriers, cp_len):
-    if len(symbols) == 0:
-        return np.array([])
-    n_ofdm = int(np.ceil(len(symbols) / num_subcarriers))
-    padded = np.pad(symbols, (0, n_ofdm * num_subcarriers - len(symbols)))
-    reshaped = padded.reshape((n_ofdm, num_subcarriers))
-    ifft_data = np.fft.ifft(reshaped, axis=1)
-    ofdm_with_cp = np.hstack([ifft_data[:, -cp_len:], ifft_data])
-    return ofdm_with_cp.flatten()
-
-def compute_energy_from_plaintext(plaintext):
-    """Given plaintext as struct(M,nc,cp)+pkt, reconstruct bits->OFDM and compute average energy"""
-    try:
-        M, nc, cp = struct.unpack(">H H B", plaintext[:5])
-        pkt = plaintext[5:]
-        msg_len = struct.unpack(">H", pkt[:2])[0]
-        msg_bytes = pkt[2:2+msg_len]
-        bits = bits_from_bytes(msg_bytes)
-        tx_symbols = qam_mod(bits, M)
-        ofdm_sig = ofdm_mod(tx_symbols, nc, cp)
-        energy = float(np.mean(np.abs(ofdm_sig)**2)) if ofdm_sig.size>0 else 0.0
-        return energy, ofdm_sig, M, nc, cp, msg_bytes.decode("utf-8", errors="replace")
-    except Exception:
-        return 0.0, np.array([]), 16, 64, 8, "<decode_error>"
-
-def process_incoming_frame(src_id, dst_id, raw_payload_after_dst, hop_count=0):
-    """
-    Process a frame incoming from a local client.
-    raw_payload_after_dst is the exact bytes received after destination ID (this MAY include an
-    optional 8-byte sensing header followed by RS-coded bytes, or it may be just the RS-coded bytes).
-    This function:
-      - tries to detect and use optional sensing header
-      - tries RS-decode/AES-decrypt for BS-side sensing computation (best-effort)
-      - updates energy history and primary activity timestamp
-      - if sender is secondary and primary was active recently -> queue
-      - otherwise attempt local delivery or hop to neighbor
-    """
-    # Immediately log raw receipt so we always have a BS-side record
-    try:
-        print(f"[BS {BS_ID}] Raw frame received: src={src_id} dst={dst_id} len={len(raw_payload_after_dst)} bytes")
-    except Exception:
-        print(f"[BS {BS_ID}] Raw frame received (src/dst len logging failed)")
-
-    encoded_bytes_with_possible_header = raw_payload_after_dst
-
-    energy = 0.0
-    ofdm_sig = np.array([])
-    M = 16; nc = 64; cp = 8; msg_text = "<unknown>"
-    sensing_header_present = False
-    parsed_plaintext = None
-
-    # Try Path A: if there are at least 8 bytes, interpret first 8 as sensing header, then RS-decode remainder
-    if len(encoded_bytes_with_possible_header) >= 8:
-        possible_hdr = encoded_bytes_with_possible_header[:8]
-        remainder = encoded_bytes_with_possible_header[8:]
-        try:
-            sensing_energy_tmp = struct.unpack(">d", possible_hdr)[0]
-            rs_decoded = rs.decode(remainder)[0]
-            plaintext = aes_gcm_decrypt(rs_decoded, KEY)
-            sensing_header_present = True
-            parsed_plaintext = plaintext
-            energy = float(sensing_energy_tmp)
-            try:
-                _energy, _ofdm_sig, M, nc, cp, msg_text = compute_energy_from_plaintext(plaintext)
-                if _ofdm_sig.size > 0:
-                    ofdm_sig = _ofdm_sig
-                    energy = _energy
-            except Exception:
-                pass
-        except Exception:
-            parsed_plaintext = None
-            sensing_header_present = False
-
-    # Path B: if Path A failed or not attempted, try RS-decode full buffer
-    if parsed_plaintext is None:
-        try:
-            rs_decoded = rs.decode(encoded_bytes_with_possible_header)[0]
-            plaintext = aes_gcm_decrypt(rs_decoded, KEY)
-            parsed_plaintext = plaintext
-            energy, ofdm_sig, M, nc, cp, msg_text = compute_energy_from_plaintext(plaintext)
-        except Exception:
-            parsed_plaintext = None
-
-    # If we have any energy measurement (either from header or from computed plaintext) -> record it
-    try:
-        ENERGY_HISTORY.append((time.time(), src_id, float(energy)))
-    except Exception:
-        pass
-
-    # If plaintext was obtained, update LAST_PRIMARY_ACTIVITY for primary senders
-    if parsed_plaintext is not None and src_id.upper() in PRIMARY_SENDERS:
-        global LAST_PRIMARY_ACTIVITY
-        LAST_PRIMARY_ACTIVITY = time.time()
-        log_msg = f"Primary TX detected from {src_id}, energy={energy:.4e}"
-        print(f"[BS {BS_ID}] {log_msg}")
-        with stats_lock:
-            stats.setdefault("primary_events", 0)
-            stats["primary_events"] += 1
-    else:
-        if src_id.upper() in PRIMARY_SENDERS:
-            LAST_PRIMARY_ACTIVITY = time.time()
-            print(f"[BS {BS_ID}] Primary sender activity noted (no plaintext), src={src_id}")
-
-    # Enforce priority: if this sender is secondary and a primary was active recently, queue
-    is_primary_sender = (src_id.upper() in PRIMARY_SENDERS)
-    now = time.time()
-    if (not is_primary_sender) and (now - LAST_PRIMARY_ACTIVITY) < PRIMARY_PROTECTION_WINDOW:
-        print(f"[BS {BS_ID}] Queuing secondary message from {src_id} (recent primary activity).")
-        with stats_lock:
-            stats["queued"] += 1
-        item = {"src_id": src_id, "dst_id": dst_id, "payload": encoded_bytes_with_possible_header, "hop_count": hop_count, "ts": time.time()}
-        with retry_queue_lock:
-            retry_queue.append(item)
-        return
-
-    # Attempt immediate delivery (forward EXACT payload as received after dst id, preserving sensing header if any)
-    with clients_lock:
-        dst_info = clients.get(dst_id)
-    if dst_info and distance(BS_POS, dst_info.get("pos", (0,0))) <= COMM_RANGE:
-        src_bytes = src_id.encode("utf-8")
-        payload = struct.pack(">H", len(src_bytes)) + src_bytes + encoded_bytes_with_possible_header
-        wire_frame = struct.pack(">I", len(payload)) + payload
-
-        if send_all_with_retry(dst_info["conn"], wire_frame):
-            print(f"[BS {BS_ID}] Delivered from {src_id} -> local {dst_id}")
-            with stats_lock:
-                stats["forwarded_local"] += 1; stats["delivered"] += 1
-                stats["per_hop_counts"].append(hop_count)
-            return
-        else:
-            print(f"[BS {BS_ID}] Failed to deliver locally to {dst_id}, will attempt hop/queue.")
-
-    # Not local or couldn't deliver: hop to neighbor(s)
-    src_bytes, dst_bytes = src_id.encode("utf-8"), dst_id.encode("utf-8")
-    hop_payload = (struct.pack(">B", hop_count + 1) +
-                   struct.pack(">H", len(src_bytes)) + src_bytes +
-                   struct.pack(">H", len(dst_bytes)) + dst_bytes + encoded_bytes_with_possible_header)
-    hop_wire = struct.pack(">I", len(hop_payload)) + hop_payload
+def process_incoming_frame(src_id, dst_id, encoded_bytes, hop_count=0):
+    global JAMMING_ACTIVE, JAMMING_LAST_SEEN
     
-    forwarded = False
-    for nb_host, nb_port in NEIGHBORS:
-        try:
-            with socket.create_connection((nb_host, nb_port), timeout=2.0) as nb_sock:
-                nb_sock.sendall(hop_wire)
-                forwarded = True
-                print(f"[BS {BS_ID}] Hopped message from {src_id} -> neighbor for {dst_id}")
-                with stats_lock: stats["forwarded_remote"] += 1
-                break
-        except Exception as e:
-            # neighbor hop failed: continue to next neighbor
-            continue
+    # 0. JAMMING CHECK (Physical Layer Corruption Simulation)
+    # If a jammer was recently seen, we corrupt the packet
+    if time.time() - JAMMING_LAST_SEEN < JAMMING_TIMEOUT:
+        JAMMING_ACTIVE = True
+    else:
+        JAMMING_ACTIVE = False
 
-    if not forwarded:
-        print(f"[BS {BS_ID}] Queued message for {dst_id} (no neighbor available)")
-        with stats_lock: stats["queued"] += 1
-        item = {"src_id": src_id, "dst_id": dst_id, "payload": encoded_bytes_with_possible_header, "hop_count": hop_count, "ts": time.time()}
-        with retry_queue_lock: retry_queue.append(item)
+    final_payload = encoded_bytes
+    if JAMMING_ACTIVE:
+        print(f"[BS {BS_ID}] ! JAMMING ACTIVE ! Corrupting packet from {src_id}...")
+        with stats_lock: stats["jammed"] += 1
+        
+        # --- BIT FLIPPING ATTACK (Simulate Noise) ---
+        # We turn the bytes into a mutable bytearray and flip random bits
+        # This will cause RS-Decoding or AES-GCM tag verification to fail at Receiver
+        ba = bytearray(encoded_bytes)
+        # Corrupt 30% of bytes to simulate heavy interference
+        corruption_intensity = int(len(ba) * 0.3) 
+        for _ in range(corruption_intensity):
+            idx = random.randint(0, len(ba)-1)
+            ba[idx] = ba[idx] ^ random.randint(1, 255) # XOR with noise
+        final_payload = bytes(ba)
+        # --------------------------------------------
+
+    try:
+        # 1. Sensing & Decoding (Try to decode even if corrupted - might fail now)
+        try:
+            payload_to_decode = final_payload[8:] if len(final_payload) >= 8 else final_payload
+            rs_decoded = rs.decode(payload_to_decode)[0]
+            plaintext = aes_gcm_decrypt(rs_decoded, KEY)
+            M, nc, cp = struct.unpack(">H H B", plaintext[:5])
+            msg_bytes = plaintext[5:][2+struct.unpack(">H", plaintext[5:][:2])[0]:]
+            
+            tx_syms = qam_mod(bits_from_bytes(msg_bytes), M)
+            ofdm_sig = ofdm_mod(tx_syms, nc, cp)
+            energy = float(np.mean(np.abs(ofdm_sig)**2)) if ofdm_sig.size > 0 else 0.0
+            
+            ENERGY_HISTORY.append((time.time(), src_id, energy))
+            
+            if src_id.upper() in PRIMARY_SENDERS:
+                global LAST_PRIMARY_ACTIVITY
+                LAST_PRIMARY_ACTIVITY = time.time()
+                print(f"[BS {BS_ID}] Primary Activity: {src_id} (E={energy:.2e})")
+        except: 
+            # If decoding failed (likely due to Jamming), we just pass.
+            pass
+
+        # 2. Priority Logic
+        is_primary_link = (src_id.upper() in PRIMARY_SENDERS) or (dst_id.upper() in PRIMARY_SENDERS)
+        
+        if (not is_primary_link) and (time.time() - LAST_PRIMARY_ACTIVITY < PRIMARY_PROTECTION_WINDOW):
+            print(f"[BS {BS_ID}] Deferring Secondary {src_id}->{dst_id} (Channel protected)")
+            with stats_lock: stats["queued"] += 1
+            with retry_queue_lock:
+                retry_queue.append({"src": src_id, "dst": dst_id, "data": final_payload, "hop": hop_count, "ts": time.time()})
+            return
+
+        # 3. Routing
+        with clients_lock: dst_info = clients.get(dst_id)
+        if dst_info and distance(BS_POS, dst_info["pos"]) <= COMM_RANGE:
+            src_b = src_id.encode("utf-8")
+            payload = struct.pack(">H", len(src_b)) + src_b + final_payload
+            if send_all_with_retry(dst_info["conn"], struct.pack(">I", len(payload)) + payload):
+                print(f"[BS {BS_ID}] Delivered: {src_id} -> {dst_id}")
+                with stats_lock: stats["delivered"] += 1; stats["forwarded_local"] += 1
+                return
+
+        src_b, dst_b = src_id.encode("utf-8"), dst_id.encode("utf-8")
+        hop_payload = struct.pack(">B H", hop_count+1, len(src_b)) + src_b + struct.pack(">H", len(dst_b)) + dst_b + final_payload
+        for nb_h, nb_p in NEIGHBORS:
+            try:
+                with socket.create_connection((nb_h, nb_p), timeout=2) as s:
+                    s.sendall(struct.pack(">I", len(hop_payload)) + hop_payload)
+                    print(f"[BS {BS_ID}] Hopped: {src_id} -> {dst_id}")
+                    with stats_lock: stats["forwarded_remote"] += 1
+                    return
+            except: continue
+
+        print(f"[BS {BS_ID}] Queueing {dst_id} (Unreachable)")
+        with retry_queue_lock:
+            retry_queue.append({"src": src_id, "dst": dst_id, "data": final_payload, "hop": hop_count, "ts": time.time()})
+            
+    except Exception as e: print(f"[BS {BS_ID}] Error: {e}")
 
 def handle_registered_client(conn, addr):
-    client_id = None
     try:
         buf = b""
-        while b"\n" not in buf:
-            chunk = conn.recv(1024)
-            if not chunk: raise ConnectionError("Client closed before registration")
-            buf += chunk
-        
-        line, buffer = buf.split(b"\n", 1)
+        while b"\n" not in buf: buf += conn.recv(1024)
+        line, buf = buf.split(b"\n", 1)
         reg = json.loads(line.decode("utf-8"))
         client_id = reg["id"]
-        with clients_lock:
-            clients[client_id] = {"conn": conn, "addr": addr, "type": reg["type"], "pos": tuple(reg["pos"])}
-        print(f"[BS {BS_ID}] Registered {reg['type']} '{client_id}' at {reg['pos']} from {addr}")
+        client_type = reg.get("type", "sender")
+        
+        # --- JAMMER HANDLING ---
+        if client_type == "jammer":
+            print(f"[BS {BS_ID}] !!! WARNING: JAMMER CONNECTED ({client_id}) !!!")
+            # Loop specifically for Jammer traffic to avoid processing overhead
+            while not STOP.is_set():
+                # Read Jammer packet headers [ID_LEN (2)]
+                h = recv_full(conn, 4) 
+                # Just consume the data stream to "sense" the jamming
+                length = struct.unpack(">I", h)[0]
+                _ = recv_full(conn, length)
+                
+                # Update Jamming State
+                global JAMMING_LAST_SEEN
+                JAMMING_LAST_SEEN = time.time()
+                # We don't forward jammer packets, we just register the interference
+                # print(f"[BS {BS_ID}] Interference detected from {client_id}")
+            return
+        # -----------------------
+
+        with clients_lock: clients[client_id] = {"conn": conn, "pos": tuple(reg["pos"])}
+        print(f"[BS {BS_ID}] Registered {client_id}")
 
         while not STOP.is_set():
-            while len(buffer) < 4:
-                more = conn.recv(4096)
-                if not more: raise ConnectionError("Client closed")
-                buffer += more
-            length, buffer = struct.unpack(">I", buffer[:4])[0], buffer[4:]
-            
-            while len(buffer) < length:
-                more = conn.recv(4096)
-                if not more: raise ConnectionError("Client closed during payload")
-                buffer += more
-            payload, buffer = buffer[:length], buffer[length:]
-
+            while len(buf) < 4: buf += conn.recv(4096)
+            length, buf = struct.unpack(">I", buf[:4])[0], buf[4:]
+            while len(buf) < length: buf += conn.recv(4096)
+            payload, buf = buf[:length], buf[length:]
             dst_len = struct.unpack(">H", payload[:2])[0]
             dst_id = payload[2:2+dst_len].decode("utf-8")
-            remaining = payload[2+dst_len:]  # KEEP the original bytes after the dst id (may include sensing header)
-
-            # Immediate logging of frame receipt (guarantees BS records every frame)
-            try:
-                print(f"[BS {BS_ID}] Received frame from {client_id} -> {dst_id} ({len(remaining)} bytes after dst id)")
-            except Exception:
-                pass
-
-            with stats_lock:
-                stats["received"] += 1
-
-            # Pass the entire remaining bytes (including header if present) to process_incoming_frame
-            threading.Thread(target=process_incoming_frame, args=(client_id, dst_id, remaining), daemon=True).start()
-
-    except (ConnectionError, ConnectionResetError, struct.error, json.JSONDecodeError):
-        pass
+            remaining = payload[2+dst_len:]
+            with stats_lock: stats["received"] += 1
+            FRAME_PROCESSOR_POOL.submit(process_incoming_frame, client_id, dst_id, remaining)
+    except: pass
     finally:
-        if client_id:
-            with clients_lock: clients.pop(client_id, None)
-            print(f"[BS {BS_ID}] Client {client_id} disconnected.")
+        with clients_lock: clients.pop(client_id, None) if 'client_id' in locals() else None
         conn.close()
 
 def handle_hop_connection(conn, addr):
     try:
         payload = recv_full(conn, struct.unpack(">I", recv_full(conn, 4))[0])
-        hop_count = payload[0]
-        pos = 1
+        hop, pos = payload[0], 1
         src_len = struct.unpack(">H", payload[pos:pos+2])[0]; pos += 2
-        src_id = payload[pos:pos+src_len].decode("utf-8"); pos += src_len
+        src = payload[pos:pos+src_len].decode("utf-8"); pos += src_len
         dst_len = struct.unpack(">H", payload[pos:pos+2])[0]; pos += 2
-        dst_id = payload[pos:pos+dst_len].decode("utf-8"); pos += dst_len
-        encoded_bytes = payload[pos:]
-        
-        print(f"[BS {BS_ID}] Received hop from {addr} for {src_id} -> {dst_id}")
-        with stats_lock: stats["received"] += 1
-        process_incoming_frame(src_id, dst_id, encoded_bytes, hop_count)
-    except Exception as e:
-        print(f"[BS {BS_ID}] Error handling hop from {addr}: {e}")
-    finally:
-        conn.close()
+        dst = payload[pos:pos+dst_len].decode("utf-8"); pos += dst_len
+        FRAME_PROCESSOR_POOL.submit(process_incoming_frame, src, dst, payload[pos:], hop)
+    except: pass
+    finally: conn.close()
 
-def accept_loop():
+def retry_worker():
+    while not STOP.is_set():
+        time.sleep(1.0)
+        if time.time() - LAST_PRIMARY_ACTIVITY < PRIMARY_PROTECTION_WINDOW: continue
+        with retry_queue_lock:
+            for _ in range(len(retry_queue)):
+                item = retry_queue.popleft()
+                FRAME_PROCESSOR_POOL.submit(process_incoming_frame, item["src"], item["dst"], item["data"], item["hop"])
+
+def main():
+    threading.Thread(target=retry_worker, daemon=True).start()
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
         sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         sock.bind((HOST, PORT))
         sock.listen(16)
-        print(f"[BS {BS_ID}] Listening on {HOST}:{PORT} (pos={BS_POS}, range={COMM_RANGE})")
-        while not STOP.is_set():
-            try:
-                conn, addr = sock.accept()
-                first_char = conn.recv(1, socket.MSG_PEEK)
-                if first_char == b'{':
-                    threading.Thread(target=handle_registered_client, args=(conn, addr), daemon=True).start()
-                else:
-                    threading.Thread(target=handle_hop_connection, args=(conn, addr), daemon=True).start()
-            except Exception:
-                continue
-
-# ---------- Retry thread to attempt queued deliveries periodically ----------
-def retry_worker():
-    while not STOP.is_set():
+        print(f"[BS {BS_ID}] Listening on {PORT}")
         try:
-            with retry_queue_lock:
-                if not retry_queue:
-                    pass
-                else:
-                    item = retry_queue.popleft()
-                    # check if primary protection window expired; if not, push back
-                    if (time.time() - LAST_PRIMARY_ACTIVITY) < PRIMARY_PROTECTION_WINDOW:
-                        retry_queue.append(item)
-                        time.sleep(0.5)
-                        continue
-                    # try deliver
-                    process_incoming_frame(item["src_id"], item["dst_id"], item["payload"], item.get("hop_count", 0))
-            time.sleep(0.5)
-        except Exception:
-            time.sleep(0.5)
-            continue
-
-# ---------- Reporting (energy timeline plot) ----------
-def export_report():
-    try:
-        figs = []
-        # Energy timeline plot
-        if ENERGY_HISTORY:
-            ts = np.array([e[0] for e in ENERGY_HISTORY])
-            energies = np.array([e[2] for e in ENERGY_HISTORY])
-            labels = [e[1] for e in ENERGY_HISTORY]
-            fig = plt.figure(figsize=(10,4))
-            plt.plot(ts - ts[0], energies, marker='o', linewidth=1)
-            # Shade regions where primary activity recorded within protection window
-            for i,(t, src, en) in enumerate(ENERGY_HISTORY):
-                if src.upper() in PRIMARY_SENDERS:
-                    # shade a rectangle for protection window
-                    start = t - ts[0] - 0.1
-                    end = start + PRIMARY_PROTECTION_WINDOW
-                    plt.axvspan(max(0,start), end, alpha=0.12, color='red')
-            plt.title(f"{BS_ID} - Energy timeline (per-message). Red shading = primary protection windows")
-            plt.xlabel("Time (s since first measured)")
-            plt.ylabel("Avg OFDM energy (power)")
-            figs.append(fig)
-        else:
-            fig = plt.figure(figsize=(8,4)); plt.text(0.5, 0.5, "No energy measurements", ha='center', va='center', transform=plt.gca().transAxes); plt.title("Energy timeline"); figs.append(fig)
-
-        # Stats summary figure
-        fig2 = plt.figure(figsize=(6,4))
-        txt = f"Stats - {BS_ID}\nReceived: {stats.get('received',0)}\nForwarded Local: {stats.get('forwarded_local',0)}\nForwarded Remote: {stats.get('forwarded_remote',0)}\nQueued: {stats.get('queued',0)}\nDelivered: {stats.get('delivered',0)}\nPrimary Events: {stats.get('primary_events',0)}"
-        plt.text(0.01, 0.5, txt, fontsize=12, va='center')
-        plt.axis('off')
-        figs.append(fig2)
-
-        timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
-        pdf_path = os.path.join(RESULTS_DIR, f"base_station_{BS_INSTANCE}_report_{timestamp}.pdf")
-        with PdfPages(pdf_path) as pdf:
-            for f in figs:
-                pdf.savefig(f)
-                plt.close(f)
-        print(f"[BS {BS_ID}] Exported report to {pdf_path}")
-    except Exception as e:
-        print(f"[BS {BS_ID}] Error exporting report: {e}")
-
-def main():
-    # start retry worker
-    threading.Thread(target=retry_worker, daemon=True).start()
-    try:
-        accept_loop()
-    except KeyboardInterrupt:
-        print(f"\n[BS {BS_ID}] Shutting down...")
-    finally:
-        STOP.set()
-        # export report before exit
-        export_report()
+            while not STOP.is_set():
+                conn, addr = sock.accept()
+                if conn.recv(1, socket.MSG_PEEK) == b'{': threading.Thread(target=handle_registered_client, args=(conn, addr), daemon=True).start()
+                else: threading.Thread(target=handle_hop_connection, args=(conn, addr), daemon=True).start()
+        except KeyboardInterrupt: STOP.set(); FRAME_PROCESSOR_POOL.shutdown(wait=False)
 
 if __name__ == "__main__":
     main()
