@@ -51,3 +51,84 @@ Ensure you have Python 3.8+ installed. Install the required dependencies:
 
 ```bash
 pip install numpy matplotlib pycryptodome reedsolo
+## Usage Guide
+To run the full simulation, open four separate terminal windows and execute the scripts in the following order:
+
+1. Start the Base Station
+This initializes the network coverage area and starts listening on the default port (50050).
+
+Bash
+python base_station.py
+
+2. Start the Receiver
+Register a receiver to listen for incoming messages.
+
+Bash
+python Dynamic_Receiver.py
+# When prompted, Enter Receiver ID: R1
+
+3. Start the Sender (Normal Operation)
+You can login as a Secondary User (S1-S60) or a Primary User (JAZZ, UFONE, etc.).
+
+Bash
+python Dynamic_Sender.py
+# Enter Sender ID: S1 (for Secondary) OR JAZZ (for Primary)
+# Enter Recipient ID: R1
+# Type a message to verify connection.
+
+4. Start the Jammer (Attack Simulation)
+To test network resilience, launch the jammer in a new terminal. This node will broadcast noise bursts.
+
+Bash
+python Dynamic_Jammer.py
+# The script will automatically start flooding the Base Station.
+
+---
+
+## Test Scenarios
+
+Scenario A: Spectrum Sensing (Listen Before Talk)
+Start Dynamic_Sender.py as Secondary User (S1).
+The system simulates background noise using a Markov Chain model.
+Observation: If the simulated channel energy is high (BUSY), S1 will print [SENSING] Busy. Backing off... and refuse to transmit. This proves the node is respecting the spectrum availability.
+
+Scenario B: Primary User Preemption
+Establish a connection between Secondary User (S1) and R1. Send a few messages.
+Start a second sender instance as Primary User (JAZZ) and connect to R1.
+Observation:
+The Receiver (R1) will detect the high-priority request.
+It will print [PRIORITY] Primary User 'JAZZ' is preempting Secondary User 'S1'!.
+S1 will be disconnected immediately, and JAZZ will take over the channel.
+
+Scenario C: Jamming Attack & Physical Layer Corruption
+Establish a stable connection between any sender and receiver.
+Run Dynamic_Jammer.py.
+Attempt to send a message from the Sender.
+Observation:
+Base Station: Detects interference and prints ! JAMMING ACTIVE ! Corrupting packet....
+Receiver: Fails to verify the AES-GCM tag and prints [!] PACKET CORRUPTED/JAMMED.
+Visualization: The generated PDF report will show the corrupted packet as a Red, Scattered Constellation Diagram, visually proving the destruction of the signal integrity.
+
+---
+
+## Results & Visualization
+The system automatically generates PDF reports in the node_logs directory (e.g., R1_plots_TIMESTAMP.pdf). These reports are crucial for analyzing the PHY layer performance.
+
+1. Clean Signal (Normal Operation)
+When the channel is clear, the Constellation Diagram shows distinct, well-separated blue dots (symbols).
+
+Visual: A clean grid (4x4 for QAM-16, 8x8 for QAM-64).
+Meaning: High Signal-to-Noise Ratio (SNR) and successful demodulation.
+
+2. Spectrum Sensing Plot
+This plot visualizes the instantaneous power of the received signal against the noise threshold.
+
+Visual: A blue waveform representing signal energy vs. a red dashed line representing the threshold.
+Meaning: Peaks above the red line indicate active transmission or high noise.
+
+3. Jammed Signal (Under Attack)
+During a jamming attack, the Base Station injects random bit errors. The Receiver plots these corrupted packets in Red.
+
+Visual: The constellation diagram becomes a chaotic "cloud" of red dots with no grid structure.
+Label: The plot text box explicitly states Msg: "[JAMMED] CORRUPTED DATA...".
+Meaning: The physical integrity of the signal was destroyed by the Jammer, preventing successful decoding.
