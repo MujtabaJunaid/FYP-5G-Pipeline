@@ -1,0 +1,18 @@
+2026-01-28T07:23:07.998596Z Received from S1: Hello from S1
+2026-01-28T07:23:08.031801Z Received from S1: 
+2026-01-28T07:23:29.270225Z Received from S1: I am a secondary user
+2026-01-28T07:23:51.208991Z Received from PTCL: Hello from PTCL the Primary user 
+2026-01-28T07:29:02.022310Z Received from PTCL: jAMMED 
+2026-01-28T07:29:08.138069Z Received JAMMED/CORRUPTED packet from PTCL
+Peer: S1
+Msg: Hello from S1 (QAM-16)
+Msg:  (QAM-16)
+Msg: Hello from R1 (QAM-16)
+Msg: I am a secondary user (QAM-16)
+Peer: PTCL
+Msg: Hello from PTCL the Primary user  (QAM-16)
+Msg: Time to check jamming (QAM-16)
+Msg: Alright (QAM-16)
+Msg: Jammed (QAM-16)
+Msg: jAMMED  (QAM-16)
+Msg: [JAMMED] CORRUPTED DATA (QAM-16)
