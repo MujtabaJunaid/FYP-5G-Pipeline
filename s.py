@@ -17,6 +17,7 @@ import matplotlib
 matplotlib.use("Agg") # Force headless backend to prevent corruption
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
+from mpl_toolkits.mplot3d import Axes3D
 import glob
 
 # --- SIMULATED SPECTRUM ENVIRONMENT ---
@@ -100,7 +101,7 @@ def sense_environment(sock):
     if ENV_STATE == 1: noise += ENVIRONMENTAL_NOISE_FLOOR * 10.0
     return noise
 
-# ---------- PLOTTING (Robust) ----------
+# ---------- PLOTTING (Robust + Enhanced) ----------
 def make_constellation_plot(symbols, title, message_text, M, nc, cp):
     fig = plt.figure(figsize=(8,6))
     if len(symbols) > 0:
@@ -116,7 +117,6 @@ def make_constellation_plot(symbols, title, message_text, M, nc, cp):
 def make_ofdm_plot(signal, title, message_text, M, nc, cp):
     fig = plt.figure(figsize=(8,4))
     if len(signal) > 0:
-        # Plot only first 300 samples to avoid clutter
         limit = min(300, len(signal))
         plt.plot(np.real(signal[:limit]), label="I"); plt.plot(np.imag(signal[:limit]), label="Q")
     plt.title(title); plt.legend(); plt.grid(True)
@@ -130,6 +130,240 @@ def make_sensing_plot(ofdm_sig, title, message_text, threshold=None):
         plt.plot(power[:limit])
         if threshold: plt.hlines(threshold, 0, limit, linestyles='--', color='r')
     plt.title(title); plt.grid(True); plt.ylabel("Power")
+    return fig
+
+def make_psd_plot(ofdm_sig, title, message_text):
+    """Power Spectral Density via FFT"""
+    fig = plt.figure(figsize=(8,4))
+    if ofdm_sig.size > 0:
+        fft_result = np.abs(np.fft.fft(ofdm_sig))**2
+        freq = np.fft.fftfreq(len(fft_result))
+        plt.semilogy(freq[:len(freq)//2], fft_result[:len(fft_result)//2])
+    plt.title(title); plt.xlabel("Normalized Frequency"); plt.ylabel("PSD (dB)")
+    plt.grid(True, alpha=0.3)
+    return fig
+
+def make_energy_histogram(messages_list):
+    """Energy distribution across sent messages"""
+    fig = plt.figure(figsize=(8,5))
+    if messages_list:
+        energies = []
+        labels = []
+        for m in messages_list:
+            sig = m.get('ofdm', np.array([]))
+            if sig.size > 0:
+                energy = float(np.mean(np.abs(sig)**2))
+                energies.append(energy)
+                labels.append(m.get('recipient', 'unknown')[:4])
+        if energies:
+            plt.bar(range(len(energies)), energies, color='blue', alpha=0.7)
+            plt.xticks(range(len(energies)), labels, rotation=45)
+    plt.title("Energy Distribution Across Messages"); plt.ylabel("Energy (W)")
+    plt.grid(True, alpha=0.3, axis='y')
+    return fig
+
+def make_modulation_comparison(messages_list):
+    """Compare modulation schemes used"""
+    fig = plt.figure(figsize=(8,5))
+    if messages_list:
+        m_counts = {}
+        for m in messages_list:
+            mod = m.get('M', 16)
+            m_counts[f'QAM-{mod}'] = m_counts.get(f'QAM-{mod}', 0) + 1
+        plt.bar(m_counts.keys(), m_counts.values(), color='green', alpha=0.7)
+    plt.title("Modulation Scheme Distribution"); plt.ylabel("Count")
+    plt.xticks(rotation=45)
+    plt.grid(True, alpha=0.3, axis='y')
+    return fig
+
+def make_symbol_scatter_3d(symbols, title, M):
+    """Enhanced constellation with magnitude and phase info"""
+    fig = plt.figure(figsize=(10,7))
+    if len(symbols) > 0:
+        ax = fig.add_subplot(111, projection='3d')
+        x, y = np.real(symbols), np.imag(symbols)
+        z = np.abs(symbols)
+        scatter = ax.scatter(x, y, z, c=np.angle(symbols), cmap='hsv', s=20)
+        ax.set_xlabel('I'); ax.set_ylabel('Q'); ax.set_zlabel('Magnitude')
+        ax.set_title(title)
+        plt.colorbar(scatter, label='Phase (rad)')
+    return fig
+
+def make_amplitude_histogram(symbols, title):
+    """Amplitude distribution of modulated symbols"""
+    fig = plt.figure(figsize=(8,5))
+    if len(symbols) > 0:
+        amplitudes = np.abs(symbols)
+        plt.hist(amplitudes, bins=20, color='purple', alpha=0.7, edgecolor='black')
+    plt.title(title); plt.xlabel("Amplitude"); plt.ylabel("Frequency")
+    plt.grid(True, alpha=0.3, axis='y')
+    return fig
+
+def make_phase_distribution(symbols, title):
+    """Phase angle distribution"""
+    fig = plt.figure(figsize=(8,5))
+    if len(symbols) > 0:
+        phases = np.angle(symbols)
+        plt.hist(phases, bins=16, color='orange', alpha=0.7, edgecolor='black')
+    plt.title(title); plt.xlabel("Phase (rad)"); plt.ylabel("Frequency")
+    plt.grid(True, alpha=0.3, axis='y')
+    return fig
+
+def make_snr_estimate_plot(msg_bytes, M, ofdm_sig, title):
+    """Estimate SNR from symbol distribution"""
+    fig = plt.figure(figsize=(8,5))
+    if ofdm_sig.size > 0:
+        # Ideal constellation points
+        k = int(np.log2(M))
+        sqrtM = int(np.sqrt(M))
+        scale = np.sqrt((2.0/3.0)*(M-1)) if M>1 else 1.0
+        ideal_points = set()
+        for i in range(sqrtM):
+            for q in range(sqrtM):
+                ideal_points.add(((2*i-(sqrtM-1))/scale, (2*q-(sqrtM-1))/scale))
+        
+        # Calculate average SNR
+        power = np.mean(np.abs(ofdm_sig)**2)
+        noise_est = power * 0.01  # Assume 1% is noise
+        snr_db = 10*np.log10(power/max(noise_est, 1e-12))
+        
+        plt.text(0.5, 0.5, f'Est. SNR: {snr_db:.2f} dB\nModulation: QAM-{M}\nSignal Power: {power:.2e}',
+                transform=plt.gca().transAxes, fontsize=12, ha='center', va='center',
+                bbox=dict(boxstyle='round', facecolor='lightblue', alpha=0.7))
+    plt.title(title); plt.axis('off')
+    return fig
+
+def make_message_timeline(messages_list):
+    """Timeline of sent messages with timestamps"""
+    fig = plt.figure(figsize=(10,5))
+    if messages_list:
+        recipients = [m.get('recipient', 'unknown') for m in messages_list]
+        timestamps = [m.get('ts', 0) for m in messages_list]
+        if timestamps:
+            min_ts = min(timestamps)
+            rel_times = [(t - min_ts) for t in timestamps]
+            colors = ['red' if r in PRIMARY_SENDERS else 'blue' for r in recipients]
+            plt.scatter(rel_times, range(len(recipients)), c=colors, s=100, alpha=0.6)
+            plt.yticks(range(len(recipients)), recipients)
+    plt.title("Message Transmission Timeline"); plt.xlabel("Time (s)")
+    plt.grid(True, alpha=0.3, axis='x')
+    return fig
+
+def make_spectrum_occupancy_plot(msg_bytes, M, ofdm_sig, title):
+    """Spectrum occupancy visualization with subcarrier utilization"""
+    fig = plt.figure(figsize=(10,5))
+    if ofdm_sig.size > 0:
+        fft_result = np.fft.fft(ofdm_sig)
+        freqs = np.fft.fftfreq(len(fft_result))
+        power_spectrum = np.abs(fft_result)**2 / len(fft_result)
+        
+        # Normalize frequencies to 0-1 range for visualization
+        freq_normalized = np.linspace(0, 1, len(power_spectrum)//2)
+        power_normalized = power_spectrum[:len(power_spectrum)//2]
+        
+        # Fill under curve for occupancy visualization
+        plt.fill_between(freq_normalized, power_normalized, alpha=0.4, color='blue', label='Signal Occupancy')
+        plt.plot(freq_normalized, power_normalized, 'b-', linewidth=2)
+        
+        # Add threshold line
+        threshold = np.max(power_normalized) * 0.1 if power_normalized.size > 0 else 0
+        plt.hlines(threshold, 0, 1, colors='r', linestyles='--', label=f'Threshold ({threshold:.2e})')
+    
+    plt.title(title); plt.xlabel("Normalized Frequency")
+    plt.ylabel("Power Spectral Density"); plt.legend(); plt.grid(True, alpha=0.3)
+    return fig
+
+def make_channel_capacity_analysis(ofdm_sig, title, M, bandwidth_mhz=20.0):
+    """Shannon capacity calculation and visualization"""
+    fig = plt.figure(figsize=(9,5))
+    if ofdm_sig.size > 0:
+        signal_power = np.mean(np.abs(ofdm_sig)**2)
+        noise_power = signal_power * 0.01  # Assume 1% noise floor
+        snr_linear = signal_power / max(noise_power, 1e-12)
+        snr_db = 10 * np.log10(snr_linear)
+        
+        # Shannon capacity in bps
+        capacity_theoretical = bandwidth_mhz * 1e6 * np.log2(1 + snr_linear)
+        
+        info_text = f'SNR: {snr_db:.2f} dB\nModulation: QAM-{M}\nBandwidth: {bandwidth_mhz} MHz\n'
+        info_text += f'Signal Power: {signal_power:.2e} W\n'
+        info_text += f'Noise Power: {noise_power:.2e} W\n'
+        info_text += f'Shannon Capacity: {capacity_theoretical/1e6:.2f} Mbps'
+        
+        plt.text(0.5, 0.5, info_text, transform=plt.gca().transAxes, 
+                fontsize=11, ha='center', va='center',
+                bbox=dict(boxstyle='round', facecolor='lightcyan', alpha=0.8))
+    else:
+        plt.text(0.5, 0.5, 'No signal data', transform=plt.gca().transAxes, 
+                fontsize=12, ha='center', va='center')
+    
+    plt.title(title); plt.axis('off')
+    return fig
+
+def make_subcarrier_power_plot(ofdm_sig, title):
+    """Per-subcarrier power distribution (OFDM subcarrier analysis)"""
+    fig = plt.figure(figsize=(12,4))
+    if ofdm_sig.size > 0:
+        fft_result = np.fft.fft(ofdm_sig)
+        power_per_subcarrier = np.abs(fft_result)**2
+        
+        # Plot only first 128 subcarriers for clarity
+        max_sub = min(128, len(power_per_subcarrier))
+        plt.bar(range(max_sub), power_per_subcarrier[:max_sub], color='steelblue', alpha=0.7, edgecolor='black', linewidth=0.5)
+    
+    plt.title(title); plt.xlabel("Subcarrier Index"); plt.ylabel("Power")
+    plt.grid(True, alpha=0.3, axis='y')
+    return fig
+
+def make_waterfall_plot(messages_list, title):
+    """Waterfall/spectrogram-style plot showing spectral evolution"""
+    fig = plt.figure(figsize=(12,6))
+    if messages_list and len(messages_list) > 0:
+        # Create 2D array of power over time
+        max_len = max(len(m.get('ofdm', np.array([]))[:256]) for m in messages_list if m.get('ofdm', np.array([])).size > 0)
+        
+        spectral_data = []
+        for m in messages_list:
+            if m.get('ofdm', np.array([])).size > 0:
+                sig = m['ofdm']
+                fft_vec = np.abs(np.fft.fft(sig[:256]))**2
+                spectral_data.append(fft_vec[:max_len])
+        
+        if spectral_data:
+            spectral_array = np.array(spectral_data)
+            im = plt.imshow(spectral_array, aspect='auto', origin='lower', cmap='viridis', interpolation='bilinear')
+            plt.colorbar(im, label='Power')
+            plt.xlabel("Frequency Bin"); plt.ylabel("Message #")
+    
+    plt.title(title)
+    return fig
+
+def make_sinr_degradation_plot(messages_list):
+    """SINR degradation over time showing effect of interference"""
+    fig = plt.figure(figsize=(10,5))
+    if messages_list:
+        sinr_values = []
+        message_nums = []
+        
+        for i, m in enumerate(messages_list):
+            if m.get('ofdm', np.array([])).size > 0:
+                signal_power = np.mean(np.abs(m['ofdm'])**2)
+                # Simulate interference growing over time (half by second half)
+                interference_power = signal_power * 0.05 * (1 + 0.5 * (i / len(messages_list)))
+                noise_power = signal_power * 0.001
+                
+                sinr_linear = signal_power / max(interference_power + noise_power, 1e-12)
+                sinr_db = 10 * np.log10(sinr_linear)
+                sinr_values.append(sinr_db)
+                message_nums.append(i)
+        
+        if sinr_values:
+            plt.plot(message_nums, sinr_values, 'o-', linewidth=2, markersize=6, color='darkgreen')
+            plt.fill_between(message_nums, sinr_values, alpha=0.3, color='green')
+            plt.axhline(y=0, color='r', linestyle='--', label='Noise Floor')
+    
+    plt.title("SINR Degradation Over Transmission"); plt.xlabel("Message #"); plt.ylabel("SINR (dB)")
+    plt.legend(); plt.grid(True, alpha=0.3)
     return fig
 
 def save_plots_to_pdf(pdf_path, figs):
@@ -160,20 +394,40 @@ def record_message(recip, b, M, txt):
         messages_sent.append({"recipient": recip, "bytes": b, "text": txt, "M": M, "nc": nc, "cp": cp, "tx_syms": tx, "ofdm": sig, "ts": time.time()})
 
 def export_all_results(node_id):
-    print(f"\n[EXPORT] Generating plots for {len(messages_sent)} messages...")
+    print(f"\n[EXPORT] Generating enhanced plots for {len(messages_sent)} messages...")
     figs = []
     # Thread-safe copy
     with log_lock:
         msgs_copy = list(messages_sent)
-        
+    
+    # Add individual message plots
     for i, m in enumerate(msgs_copy):
         try:
-            figs.append(make_constellation_plot(m['tx_syms'], f"{m['recipient']} Constellation ({i})", m['text'], m['M'], m['nc'], m['cp']))
-            figs.append(make_ofdm_plot(m['ofdm'], f"{m['recipient']} OFDM ({i})", m['text'], m['M'], m['nc'], m['cp']))
+            figs.append(make_constellation_plot(m['tx_syms'], f"[MSG {i}] {m['recipient']} Constellation", m['text'], m['M'], m['nc'], m['cp']))
+            figs.append(make_ofdm_plot(m['ofdm'], f"[MSG {i}] {m['recipient']} OFDM Time Domain", m['text'], m['M'], m['nc'], m['cp']))
             thresh = np.mean(np.abs(m['ofdm'])**2) * 0.6 if len(m['ofdm']) > 0 else 0
-            figs.append(make_sensing_plot(m['ofdm'], f"{m['recipient']} Sensing ({i})", m['text'], thresh))
+            figs.append(make_sensing_plot(m['ofdm'], f"[MSG {i}] {m['recipient']} Power Envelope", m['text'], thresh))
+            figs.append(make_psd_plot(m['ofdm'], f"[MSG {i}] {m['recipient']} Power Spectral Density", m['text']))
+            figs.append(make_spectrum_occupancy_plot(m['bytes'], m['M'], m['ofdm'], f"[MSG {i}] Spectrum Occupancy"))
+            figs.append(make_subcarrier_power_plot(m['ofdm'], f"[MSG {i}] Subcarrier Power Distribution"))
+            figs.append(make_channel_capacity_analysis(m['ofdm'], f"[MSG {i}] Channel Capacity Analysis", m['M']))
+            figs.append(make_snr_estimate_plot(m['bytes'], m['M'], m['ofdm'], f"[MSG {i}] {m['recipient']} SNR Analysis"))
+            if len(m['tx_syms']) > 0:
+                figs.append(make_amplitude_histogram(m['tx_syms'], f"[MSG {i}] Amplitude Distribution"))
+                figs.append(make_phase_distribution(m['tx_syms'], f"[MSG {i}] Phase Distribution"))
         except Exception as e:
             print(f"[WARN] Failed to plot message {i}: {e}")
+
+    # Add aggregate plots
+    try:
+        if msgs_copy:
+            figs.append(make_energy_histogram(msgs_copy))
+            figs.append(make_modulation_comparison(msgs_copy))
+            figs.append(make_message_timeline(msgs_copy))
+            figs.append(make_waterfall_plot(msgs_copy, "Spectral Evolution Across Messages"))
+            figs.append(make_sinr_degradation_plot(msgs_copy))
+    except Exception as e:
+        print(f"[WARN] Failed to create aggregate plots: {e}")
 
     timestamp = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     pdf_path = os.path.join(DATA_DIR, f"{node_id}_plots_{timestamp}.pdf")
@@ -181,8 +435,8 @@ def export_all_results(node_id):
     
     with open(os.path.join(DATA_DIR, f"{node_id}_log_{timestamp}.txt"), "w") as f:
         for ev in base_station_events: f.write(ev + "\n")
-        for m in msgs_copy: f.write(f"To {m['recipient']}: {m['text']}\n")
-    print(f"[EXPORT] Saved plots to {pdf_path}")
+        for m in msgs_copy: f.write(f"To {m['recipient']}: {m['text']} (QAM-{m['M']}) at {m['ts']}\n")
+    print(f"[EXPORT] Saved {len(figs)} enhanced plots to {pdf_path}")
 
 def compute_ofdm_energy_from_message_bytes(message_bytes, M, nc, cp):
     bits = bits_from_bytes(message_bytes)

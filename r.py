@@ -17,6 +17,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
+from mpl_toolkits.mplot3d import Axes3D
 import glob
 
 # ---------- Config ----------
@@ -118,6 +119,349 @@ def make_sensing_plot(ofdm_sig, title, message_text, threshold=None):
     plt.title(title); plt.grid(True); plt.ylabel("Power")
     return fig
 
+def make_psd_plot(ofdm_sig, title, message_text):
+    """Power Spectral Density via FFT"""
+    fig = plt.figure(figsize=(8,4))
+    if ofdm_sig.size > 0:
+        fft_result = np.abs(np.fft.fft(ofdm_sig))**2
+        freq = np.fft.fftfreq(len(fft_result))
+        plt.semilogy(freq[:len(freq)//2], fft_result[:len(fft_result)//2], color='darkblue')
+    plt.title(title); plt.xlabel("Normalized Frequency"); plt.ylabel("PSD (dB)")
+    plt.grid(True, alpha=0.3)
+    return fig
+
+def make_received_energy_histogram(messages_by_peer_dict):
+    """Energy distribution of received messages per peer"""
+    fig = plt.figure(figsize=(10,5))
+    peer_energies = {}
+    for peer, entries in messages_by_peer_dict.items():
+        for e in entries:
+            if e.get("ofdm_sig").size > 0:
+                energy = float(np.mean(np.abs(e["ofdm_sig"])**2))
+                if peer not in peer_energies: peer_energies[peer] = []
+                peer_energies[peer].append(energy)
+    
+    if peer_energies:
+        peers = list(peer_energies.keys())
+        avg_energies = [np.mean(peer_energies[p]) for p in peers]
+        colors = ['red' if p in PRIMARY_SENDERS else 'blue' for p in peers]
+        plt.bar(peers, avg_energies, color=colors, alpha=0.7)
+    plt.title("Average Received Energy by Peer"); plt.ylabel("Energy (W)")
+    plt.xticks(rotation=45)
+    plt.grid(True, alpha=0.3, axis='y')
+    return fig
+
+def make_jammed_vs_clean_comparison(messages_by_peer_dict):
+    """Compare jammed vs clean packets"""
+    fig = plt.figure(figsize=(10,6))
+    jammed_count = sum(1 for peer, entries in messages_by_peer_dict.items() 
+                      for e in entries if "[JAMMED]" in e.get("text", ""))
+    clean_count = sum(1 for peer, entries in messages_by_peer_dict.items() 
+                     for e in entries if "[JAMMED]" not in e.get("text", ""))
+    
+    categories = ["Clean Packets", "Jammed Packets"]
+    counts = [clean_count, jammed_count]
+    colors = ['green', 'red']
+    plt.bar(categories, counts, color=colors, alpha=0.7, edgecolor='black', linewidth=2)
+    plt.title("Packet Reception Status: Clean vs Jammed"); plt.ylabel("Count")
+    for i, v in enumerate(counts):
+        plt.text(i, v + 0.5, str(v), ha='center', fontweight='bold')
+    plt.grid(True, alpha=0.3, axis='y')
+    return fig
+
+def make_packets_per_peer(messages_by_peer_dict):
+    """Message count distribution per peer"""
+    fig = plt.figure(figsize=(10,5))
+    if messages_by_peer_dict:
+        peers = list(messages_by_peer_dict.keys())
+        counts = [len(messages_by_peer_dict[p]) for p in peers]
+        colors = ['red' if p in PRIMARY_SENDERS else 'blue' for p in peers]
+        plt.bar(peers, counts, color=colors, alpha=0.7)
+    plt.title("Message Count per Peer"); plt.ylabel("Count")
+    plt.xticks(rotation=45)
+    plt.grid(True, alpha=0.3, axis='y')
+    return fig
+
+def make_symbol_scatter_3d(symbols, title, M):
+    """3D constellation with magnitude and phase info"""
+    fig = plt.figure(figsize=(10,7))
+    if len(symbols) > 0:
+        ax = fig.add_subplot(111, projection='3d')
+        x, y = np.real(symbols), np.imag(symbols)
+        z = np.abs(symbols)
+        scatter = ax.scatter(x, y, z, c=np.angle(symbols), cmap='hsv', s=20)
+        ax.set_xlabel('I'); ax.set_ylabel('Q'); ax.set_zlabel('Magnitude')
+        ax.set_title(title)
+        plt.colorbar(scatter, label='Phase (rad)')
+    return fig
+
+def make_amplitude_histogram(symbols, title):
+    """Amplitude distribution of received symbols"""
+    fig = plt.figure(figsize=(8,5))
+    if len(symbols) > 0:
+        amplitudes = np.abs(symbols)
+        plt.hist(amplitudes, bins=20, color='purple', alpha=0.7, edgecolor='black')
+    plt.title(title); plt.xlabel("Amplitude"); plt.ylabel("Frequency")
+    plt.grid(True, alpha=0.3, axis='y')
+    return fig
+
+def make_phase_distribution(symbols, title):
+    """Phase angle distribution of received symbols"""
+    fig = plt.figure(figsize=(8,5))
+    if len(symbols) > 0:
+        phases = np.angle(symbols)
+        plt.hist(phases, bins=16, color='orange', alpha=0.7, edgecolor='black')
+    plt.title(title); plt.xlabel("Phase (rad)"); plt.ylabel("Frequency")
+    plt.grid(True, alpha=0.3, axis='y')
+    return fig
+
+def make_snr_estimate_plot(ofdm_sig, M, title):
+    """Estimate SNR from received signal"""
+    fig = plt.figure(figsize=(8,5))
+    if ofdm_sig.size > 0:
+        power = np.mean(np.abs(ofdm_sig)**2)
+        noise_est = power * 0.01
+        snr_db = 10*np.log10(power/max(noise_est, 1e-12))
+        plt.text(0.5, 0.5, f'Est. SNR: {snr_db:.2f} dB\nModulation: QAM-{M}\nReceived Power: {power:.2e}',
+                transform=plt.gca().transAxes, fontsize=12, ha='center', va='center',
+                bbox=dict(boxstyle='round', facecolor='lightgreen', alpha=0.7))
+    plt.title(title); plt.axis('off')
+    return fig
+
+def make_packet_timeline(messages_by_peer_dict):
+    """Timeline of received packets with jammer events"""
+    fig = plt.figure(figsize=(12,6))
+    all_packets = []
+    for peer, entries in messages_by_peer_dict.items():
+        for e in entries:
+            is_jammed = "[JAMMED]" in e.get("text", "")
+            all_packets.append((e.get("ts", 0), peer, is_jammed))
+    
+    if all_packets:
+        all_packets.sort(key=lambda x: x[0])
+        min_ts = all_packets[0][0]
+        times = [(p[0] - min_ts) for p in all_packets]
+        colors = ['red' if p[2] else 'blue' for p in all_packets]
+        labels = [p[1] for p in all_packets]
+        plt.scatter(times, range(len(all_packets)), c=colors, s=100, alpha=0.6)
+    
+    plt.title("Received Packet Timeline (Blue=Clean, Red=Jammed)"); plt.xlabel("Time (s)")
+    plt.ylabel("Packet Index"); plt.grid(True, alpha=0.3, axis='x')
+    return fig
+
+def make_corruption_pattern(messages_by_peer_dict):
+    """Show pattern of jammed vs clean packets over time"""
+    fig = plt.figure(figsize=(12,4))
+    all_packets = []
+    for peer, entries in messages_by_peer_dict.items():
+        for e in entries:
+            is_jammed = "[JAMMED]" in e.get("text", "")
+            all_packets.append((e.get("ts", 0), 1 if is_jammed else 0))
+    
+    if all_packets:
+        all_packets.sort(key=lambda x: x[0])
+        min_ts = all_packets[0][0]
+        times = [(p[0] - min_ts) for p in all_packets]
+        corruption = [p[1] for p in all_packets]
+        plt.bar(range(len(corruption)), corruption, color=['red' if c else 'green' for c in corruption], alpha=0.7)
+    
+    plt.title("Packet Corruption Timeline"); plt.xlabel("Packet #"); plt.ylabel("Jammed (1) / Clean (0)")
+    plt.yticks([0, 1], ['Clean', 'Jammed'])
+    plt.grid(True, alpha=0.3, axis='x')
+    return fig
+
+def make_spectrum_before_after_jamming(messages_by_peer_dict):
+    """Compare spectrum before and after jamming events"""
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12,8))
+    
+    clean_packets = []
+    jammed_packets = []
+    
+    for peer, entries in messages_by_peer_dict.items():
+        for e in entries:
+            if "[JAMMED]" in e.get("text", ""):
+                jammed_packets.append(e)
+            else:
+                clean_packets.append(e)
+    
+    # Before jamming (clean packets)
+    if clean_packets:
+        for pkt in clean_packets[:3]:  # Average first 3 clean packets
+            if pkt.get("ofdm_sig", np.array([])).size > 0:
+                fft_vec = np.abs(np.fft.fft(pkt["ofdm_sig"][:256]))**2
+                ax1.semilogy(fft_vec[:128], alpha=0.6, linewidth=1)
+        ax1.set_title("BEFORE JAMMING: Clean Packet Spectra"); ax1.set_ylabel("PSD (dB)")
+        ax1.grid(True, alpha=0.3)
+    
+    # After jamming (jammed packets)
+    if jammed_packets:
+        for pkt in jammed_packets[:3]:  # Average first 3 jammed packets
+            if pkt.get("ofdm_sig", np.array([])).size > 0:
+                fft_vec = np.abs(np.fft.fft(pkt["ofdm_sig"][:256]))**2
+                ax2.semilogy(fft_vec[:128], alpha=0.6, linewidth=1, color='red')
+        ax2.set_title("AFTER JAMMING: Corrupted Packet Spectra"); ax2.set_ylabel("PSD (dB)")
+        ax2.set_xlabel("Frequency Bin")
+        ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    return fig
+
+def make_spectrum_occupancy_comparison(messages_by_peer_dict):
+    """Spectrum occupancy before vs after jamming"""
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14,5))
+    
+    clean_psd = None
+    jammed_psd = None
+    
+    # Calculate average clean spectrum
+    clean_count = 0
+    for peer, entries in messages_by_peer_dict.items():
+        for e in entries:
+            if "[JAMMED]" not in e.get("text", "") and e.get("ofdm_sig", np.array([])).size > 0:
+                fft_vec = np.abs(np.fft.fft(e["ofdm_sig"][:256]))**2
+                if clean_psd is None:
+                    clean_psd = fft_vec.copy()
+                else:
+                    clean_psd += fft_vec
+                clean_count += 1
+    
+    if clean_count > 0:
+        clean_psd /= clean_count
+        ax1.fill_between(range(128), clean_psd[:128], alpha=0.6, color='green', label='Signal')
+        ax1.plot(range(128), clean_psd[:128], 'g-', linewidth=2)
+        ax1.set_title("Clean Channel Spectrum Occupancy"); ax1.set_ylabel("Power")
+        ax1.legend(); ax1.grid(True, alpha=0.3)
+    
+    # Calculate average jammed spectrum
+    jammed_count = 0
+    for peer, entries in messages_by_peer_dict.items():
+        for e in entries:
+            if "[JAMMED]" in e.get("text", "") and e.get("ofdm_sig", np.array([])).size > 0:
+                fft_vec = np.abs(np.fft.fft(e["ofdm_sig"][:256]))**2
+                if jammed_psd is None:
+                    jammed_psd = fft_vec.copy()
+                else:
+                    jammed_psd += fft_vec
+                jammed_count += 1
+    
+    if jammed_count > 0:
+        jammed_psd /= jammed_count
+        ax2.fill_between(range(128), jammed_psd[:128], alpha=0.6, color='red', label='Jamming+Signal')
+        ax2.plot(range(128), jammed_psd[:128], 'r-', linewidth=2)
+        ax2.set_title("Jammed Channel Spectrum Occupancy"); ax2.set_ylabel("Power")
+        ax2.legend(); ax2.grid(True, alpha=0.3)
+    
+    plt.tight_layout()
+    return fig
+
+def make_jamming_intensity_plot(messages_by_peer_dict):
+    """Jamming intensity over time showing attack footprint"""
+    fig = plt.figure(figsize=(12,5))
+    
+    timestamps = []
+    intensities = []
+    packet_types = []
+    
+    for peer, entries in messages_by_peer_dict.items():
+        for e in entries:
+            ts = e.get("ts", 0)
+            is_jammed = "[JAMMED]" in e.get("text", "")
+            
+            if e.get("ofdm_sig", np.array([])).size > 0:
+                # Calculate "jamming intensity" as deviation from ideal signal
+                fft_vec = np.abs(np.fft.fft(e["ofdm_sig"][:256]))**2
+                intensity = np.std(fft_vec) / (np.mean(fft_vec) + 1e-12)
+                
+                timestamps.append(ts)
+                intensities.append(intensity)
+                packet_types.append('jammed' if is_jammed else 'clean')
+    
+    if timestamps:
+        min_ts = min(timestamps)
+        rel_times = [(t - min_ts) for t in timestamps]
+        colors = ['red' if ptype == 'jammed' else 'blue' for ptype in packet_types]
+        
+        plt.scatter(rel_times, intensities, c=colors, s=80, alpha=0.6, edgecolor='black', linewidth=0.5)
+        plt.axhline(y=np.mean(intensities), color='gray', linestyle='--', label='Mean Intensity')
+    
+    plt.title("Jamming Intensity Profile (Red=Jammed, Blue=Clean)")
+    plt.xlabel("Time (s)"); plt.ylabel("Spectral Intensity")
+    plt.legend(); plt.grid(True, alpha=0.3)
+    return fig
+
+def make_sinr_comparison_plot(messages_by_peer_dict):
+    """SINR degradation showing jamming impact"""
+    fig = plt.figure(figsize=(12,5))
+    
+    clean_sinrs = []
+    jammed_sinrs = []
+    
+    for peer, entries in messages_by_peer_dict.items():
+        for e in entries:
+            if e.get("ofdm_sig", np.array([])).size > 0:
+                signal_power = np.mean(np.abs(e["ofdm_sig"])**2)
+                noise_est = signal_power * 0.01
+                
+                # For jammed packets, add interference component
+                jammer_power = signal_power * 0.5 if "[JAMMED]" in e.get("text", "") else 0
+                
+                sinr_linear = signal_power / max(jammer_power + noise_est, 1e-12)
+                sinr_db = 10 * np.log10(sinr_linear)
+                
+                if "[JAMMED]" in e.get("text", ""):
+                    jammed_sinrs.append(sinr_db)
+                else:
+                    clean_sinrs.append(sinr_db)
+    
+    # Box plot comparison
+    data_to_plot = [clean_sinrs, jammed_sinrs]
+    labels = ['Clean Packets', 'Jammed Packets']
+    colors_box = ['green', 'red']
+    
+    bp = plt.boxplot(data_to_plot, labels=labels, patch_artist=True, widths=0.6)
+    for patch, color in zip(bp['boxes'], colors_box):
+        patch.set_facecolor(color)
+        patch.set_alpha(0.6)
+    
+    plt.title("SINR Distribution: Clean vs Jammed Packets")
+    plt.ylabel("SINR (dB)"); plt.grid(True, alpha=0.3, axis='y')
+    return fig
+
+def make_band_occupancy_evolution(messages_by_peer_dict):
+    """Band occupancy changes over time during jamming"""
+    fig = plt.figure(figsize=(12,6))
+    
+    occupancy_timeline = []
+    timestamps = []
+    
+    for peer, entries in messages_by_peer_dict.items():
+        for e in entries:
+            if e.get("ofdm_sig", np.array([])).size > 0:
+                fft_vec = np.abs(np.fft.fft(e["ofdm_sig"][:128]))**2
+                
+                # Calculate occupancy as % of subcarriers above threshold
+                threshold = np.max(fft_vec) * 0.1
+                occupancy_pct = 100 * np.sum(fft_vec > threshold) / len(fft_vec)
+                
+                occupancy_timeline.append(occupancy_pct)
+                timestamps.append(e.get("ts", 0))
+    
+    if timestamps:
+        min_ts = min(timestamps)
+        rel_times = [(t - min_ts) for t in timestamps]
+        
+        # Color code by jamming state
+        colors = ['red' if i > np.median(occupancy_timeline) * 1.2 else 'blue' for i in occupancy_timeline]
+        
+        plt.scatter(rel_times, occupancy_timeline, c=colors, s=100, alpha=0.6, edgecolor='black')
+        plt.plot(rel_times, occupancy_timeline, 'k--', alpha=0.3, linewidth=1)
+        plt.axhline(y=np.median(occupancy_timeline), color='orange', linestyle='--', label='Baseline')
+    
+    plt.title("Spectrum Band Occupancy Evolution (Red=High Occupancy/Jamming)")
+    plt.xlabel("Time (s)"); plt.ylabel("Occupied Subcarriers (%)")
+    plt.legend(); plt.grid(True, alpha=0.3)
+    return fig
+
 def save_plots_to_pdf(pdf_path, figs):
     with plot_lock:
         try:
@@ -166,32 +510,61 @@ def record_message(peer_id, text_bytes, M, message_text, is_jammed=False):
         messages_by_peer.setdefault(peer_id, []).append(entry)
 
 def export_all_results(node_id):
-    print(f"\n[EXPORT] Generating plots...")
+    print(f"\n[EXPORT] Generating comprehensive receiver plots...")
     figs = []
     with log_lock:
         peer_data = dict(messages_by_peer)
-        
+    
+    # 1. Individual message plots
     for peer, entries in peer_data.items():
         for i, e in enumerate(entries):
             try:
-                if e.get("tx_symbols").size > 0:
-                    figs.append(make_constellation_plot(e["tx_symbols"], f"{peer} Constellation ({i})", e["text"], e["M"], e["nc"], e["cp"]))
-                    figs.append(make_ofdm_plot(e["ofdm_sig"], f"{peer} OFDM ({i})", e["text"], e["M"], e["nc"], e["cp"]))
+                if e.get("tx_symbols", np.array([])).size > 0:
+                    status = "JAMMED" if "[JAMMED]" in e["text"] else "CLEAN"
+                    figs.append(make_constellation_plot(e["tx_symbols"], f"[{peer}] [{status}] Constellation ({i})", e["text"], e["M"], e["nc"], e["cp"]))
+                    figs.append(make_ofdm_plot(e["ofdm_sig"], f"[{peer}] [{status}] OFDM Time Domain ({i})", e["text"], e["M"], e["nc"], e["cp"]))
                     thresh = np.mean(np.abs(e["ofdm_sig"])**2) * 0.6 if e["ofdm_sig"].size > 0 else 0
-                    figs.append(make_sensing_plot(e["ofdm_sig"], f"{peer} Sensing ({i})", e["text"], thresh))
-            except Exception as e:
-                print(f"[WARN] Failed to plot message from {peer}: {e}")
+                    figs.append(make_sensing_plot(e["ofdm_sig"], f"[{peer}] [{status}] Power Envelope ({i})", e["text"], thresh))
+                    figs.append(make_psd_plot(e["ofdm_sig"], f"[{peer}] [{status}] PSD ({i})", e["text"]))
+                    figs.append(make_snr_estimate_plot(e["ofdm_sig"], e["M"], f"[{peer}] [{status}] SNR ({i})"))
+                    if len(e["tx_symbols"]) > 0:
+                        figs.append(make_amplitude_histogram(e["tx_symbols"], f"[{peer}] Amplitude Dist ({i})"))
+                        figs.append(make_phase_distribution(e["tx_symbols"], f"[{peer}] Phase Dist ({i})"))
+            except Exception as ex:
+                print(f"[WARN] Failed to plot message from {peer}: {ex}")
+    
+    # 2. Aggregate receiver analysis
+    try:
+        if peer_data:
+            figs.append(make_received_energy_histogram(peer_data))
+            figs.append(make_jammed_vs_clean_comparison(peer_data))
+            figs.append(make_packets_per_peer(peer_data))
+            figs.append(make_packet_timeline(peer_data))
+            figs.append(make_corruption_pattern(peer_data))
+            
+            # 3. SPECTRUM SENSING & JAMMING ANALYSIS
+            figs.append(make_spectrum_before_after_jamming(peer_data))
+            figs.append(make_spectrum_occupancy_comparison(peer_data))
+            figs.append(make_jamming_intensity_plot(peer_data))
+            figs.append(make_sinr_comparison_plot(peer_data))
+            figs.append(make_band_occupancy_evolution(peer_data))
+    except Exception as e:
+        print(f"[WARN] Failed to create aggregate plots: {e}")
     
     timestamp = datetime.datetime.utcnow().strftime("%Y%m%dT%H%M%SZ")
     pdf_path = os.path.join(DATA_DIR, f"{node_id}_plots_{timestamp}.pdf")
     save_plots_to_pdf(pdf_path, figs)
     
     with open(os.path.join(DATA_DIR, f"{node_id}_log_{timestamp}.txt"), "w") as f:
+        f.write(f"=== RECEIVER {node_id} SESSION ===\n\n")
         for ev in base_station_events: f.write(ev + "\n")
+        f.write("\n=== RECEIVED MESSAGES ===\n")
         for peer, entries in peer_data.items():
-            f.write(f"Peer: {peer}\n")
-            for e in entries: f.write(f"Msg: {e['text']} (QAM-{e['M']})\n")
-    print(f"[EXPORT] Saved plots to {pdf_path}")
+            f.write(f"\nFrom {peer} ({len(entries)} messages):\n")
+            for e in entries: 
+                status = "JAMMED" if "[JAMMED]" in e["text"] else "CLEAN"
+                f.write(f"  [{status}] {e['text']} (QAM-{e['M']})\n")
+    print(f"[EXPORT] Saved {len(figs)} comprehensive receiver plots to {pdf_path}")
 
 def compute_ofdm_energy(message_bytes, M, nc, cp):
     bits = bits_from_bytes(message_bytes)

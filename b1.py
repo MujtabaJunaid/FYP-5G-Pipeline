@@ -10,6 +10,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from matplotlib.backends.backend_pdf import PdfPages
+from mpl_toolkits.mplot3d import Axes3D
 from reedsolo import RSCodec
 from Crypto.Cipher import AES
 from Crypto.Random import get_random_bytes
@@ -242,6 +243,251 @@ def retry_worker():
                 item = retry_queue.popleft()
                 FRAME_PROCESSOR_POOL.submit(process_incoming_frame, item["src"], item["dst"], item["data"], item["hop"])
 
+def export_base_station_analysis():
+    """Generate comprehensive BS energy and jamming analysis plots"""
+    print(f"\n[BS {BS_ID}] Generating analysis plots...")
+    figs = []
+    
+    # Plot 1: Energy Timeline
+    if ENERGY_HISTORY:
+        fig = plt.figure(figsize=(12,5))
+        times = [(e[0] - ENERGY_HISTORY[0][0]) for e in ENERGY_HISTORY]
+        energies = [e[2] for e in ENERGY_HISTORY]
+        sources = [e[1] for e in ENERGY_HISTORY]
+        colors = ['red' if s.upper() in PRIMARY_SENDERS else 'blue' for s in sources]
+        plt.scatter(times, energies, c=colors, s=50, alpha=0.6)
+        plt.title(f"[BS {BS_ID}] Energy Timeline (Red=Primary Senders, Blue=Others)")
+        plt.xlabel("Time (s)"); plt.ylabel("Energy (W)")
+        plt.grid(True, alpha=0.3)
+        figs.append(fig)
+    
+    # Plot 2: Energy histogram by sender
+    if ENERGY_HISTORY:
+        fig = plt.figure(figsize=(10,5))
+        sender_energies = {}
+        for _, src, energy in ENERGY_HISTORY:
+            if src not in sender_energies:
+                sender_energies[src] = []
+            sender_energies[src].append(energy)
+        
+        senders = list(sender_energies.keys())
+        avg_energies = [np.mean(sender_energies[s]) for s in senders]
+        colors = ['red' if s.upper() in PRIMARY_SENDERS else 'blue' for s in senders]
+        plt.bar(senders, avg_energies, color=colors, alpha=0.7, edgecolor='black')
+        plt.title(f"[BS {BS_ID}] Average Energy by Source")
+        plt.ylabel("Energy (W)"); plt.xticks(rotation=45)
+        plt.grid(True, alpha=0.3, axis='y')
+        figs.append(fig)
+    
+    # Plot 3: Jamming Activity Timeline
+    fig = plt.figure(figsize=(12,4))
+    jamming_events = []
+    if ENERGY_HISTORY:
+        for i, (ts, src, _) in enumerate(ENERGY_HISTORY):
+            if src == "JAMMER_01":
+                jamming_events.append((ts - ENERGY_HISTORY[0][0], i))
+    
+    if jamming_events:
+        times_j, indices_j = zip(*jamming_events)
+        plt.scatter(times_j, indices_j, c='red', s=100, marker='X', label='Jamming Events')
+    
+    if ENERGY_HISTORY:
+        times = [(e[0] - ENERGY_HISTORY[0][0]) for e in ENERGY_HISTORY]
+        plt.plot(times, range(len(times)), 'k--', alpha=0.3, label='All Packets')
+    
+    plt.title(f"[BS {BS_ID}] Jamming Activity Detection")
+    plt.xlabel("Time (s)"); plt.ylabel("Packet #")
+    plt.legend(); plt.grid(True, alpha=0.3)
+    figs.append(fig)
+    
+    # Plot 4: Statistics Summary
+    fig = plt.figure(figsize=(10,6))
+    stat_labels = list(stats.keys())
+    stat_values = [stats[k] for k in stat_labels]
+    colors_stat = ['green', 'blue', 'blue', 'orange', 'darkgreen', 'red'][:len(stat_labels)]
+    plt.bar(stat_labels, stat_values, color=colors_stat, alpha=0.7, edgecolor='black')
+    plt.title(f"[BS {BS_ID}] Session Statistics")
+    plt.ylabel("Count"); plt.xticks(rotation=45)
+    for i, v in enumerate(stat_values):
+        plt.text(i, v + max(stat_values)*0.02, str(v), ha='center', fontweight='bold')
+    plt.grid(True, alpha=0.3, axis='y')
+    figs.append(fig)
+    
+    # Plot 5: Primary vs Secondary Link Distribution
+    fig = plt.figure(figsize=(8,5))
+    if ENERGY_HISTORY:
+        primary_count = sum(1 for _, src, _ in ENERGY_HISTORY if src.upper() in PRIMARY_SENDERS)
+        secondary_count = len(ENERGY_HISTORY) - primary_count
+        plt.pie([primary_count, secondary_count], labels=['Primary Senders', 'Secondary Senders'],
+               colors=['red', 'blue'], autopct='%1.1f%%', startangle=90)
+        plt.title(f"[BS {BS_ID}] Traffic Distribution")
+    figs.append(fig)
+    
+    # Plot 6: Queue Status Over Time
+    fig = plt.figure(figsize=(10,4))
+    plt.text(0.5, 0.7, f"Total Queued Messages: {stats['queued']}", 
+            ha='center', va='center', fontsize=14, fontweight='bold',
+            bbox=dict(boxstyle='round', facecolor='yellow', alpha=0.7))
+    plt.text(0.5, 0.4, f"Jammed Packets: {stats['jammed']}", 
+            ha='center', va='center', fontsize=14, fontweight='bold',
+            bbox=dict(boxstyle='round', facecolor='red', alpha=0.7))
+    plt.text(0.5, 0.1, f"Successful Deliveries: {stats['delivered']}", 
+            ha='center', va='center', fontsize=14, fontweight='bold',
+            bbox=dict(boxstyle='round', facecolor='green', alpha=0.7))
+    plt.axis('off')
+    plt.title(f"[BS {BS_ID}] Delivery Metrics")
+    figs.append(fig)
+    
+    # Plot 7: SPECTRUM SENSING - Energy Timeline with Jamming Overlay
+    if ENERGY_HISTORY:
+        fig = plt.figure(figsize=(14,6))
+        times = [(e[0] - ENERGY_HISTORY[0][0]) for e in ENERGY_HISTORY]
+        energies = [e[2] for e in ENERGY_HISTORY]
+        sources = [e[1] for e in ENERGY_HISTORY]
+        
+        # Plot legitimate signals
+        legit_times = [t for t, s in zip(times, sources) if s != "JAMMER_01"]
+        legit_energies = [e for e, s in zip(energies, sources) if s != "JAMMER_01"]
+        
+        # Plot jammer signals
+        jammer_times = [t for t, s in zip(times, sources) if s == "JAMMER_01"]
+        jammer_energies = [e for e, s in zip(energies, sources) if s == "JAMMER_01"]
+        
+        plt.scatter(legit_times, legit_energies, c='blue', s=50, alpha=0.6, label='Legitimate Signals', edgecolor='black', linewidth=0.5)
+        if jammer_energies:
+            plt.scatter(jammer_times, jammer_energies, c='red', s=100, alpha=0.8, marker='X', label='Jamming Signals', edgecolor='darkred', linewidth=1.5)
+        
+        plt.title(f"[BS {BS_ID}] Spectrum Sensing: Signal vs Jamming Overlay")
+        plt.xlabel("Time (s)"); plt.ylabel("Signal Energy (W)")
+        plt.yscale('log')
+        plt.legend(); plt.grid(True, alpha=0.3)
+        figs.append(fig)
+    
+    # Plot 8: JAMMING HOTSPOT - Energy Distribution Heatmap
+    if ENERGY_HISTORY:
+        fig = plt.figure(figsize=(12,5))
+        times = [(e[0] - ENERGY_HISTORY[0][0]) for e in ENERGY_HISTORY]
+        energies = [np.log10(max(e[2], 1e-15)) for e in ENERGY_HISTORY]
+        sources_idx = {s: i for i, s in enumerate(set(s for _, s, _ in ENERGY_HISTORY))}
+        source_indices = [sources_idx[s] for _, s, _ in ENERGY_HISTORY]
+        
+        scatter = plt.scatter(times, source_indices, c=energies, cmap='hot', s=100, alpha=0.7, edgecolor='black', linewidth=0.5)
+        plt.colorbar(scatter, label='Energy (log10 W)')
+        plt.yticks(range(len(sources_idx)), list(sources_idx.keys()), fontsize=9)
+        
+        plt.title(f"[BS {BS_ID}] Jamming Hotspot Heatmap")
+        plt.xlabel("Time (s)"); plt.ylabel("Source")
+        plt.grid(True, alpha=0.3, axis='x')
+        figs.append(fig)
+    
+    # Plot 9: CHANNEL OCCUPANCY - Before/After Jamming Comparison
+    if ENERGY_HISTORY:
+        fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12,8))
+        
+        # Find jamming start time
+        jammer_start = float('inf')
+        for ts, src, _ in ENERGY_HISTORY:
+            if src == "JAMMER_01":
+                jammer_start = min(jammer_start, ts)
+        
+        if jammer_start == float('inf'):
+            jammer_start = ENERGY_HISTORY[-1][0]
+        
+        min_time = ENERGY_HISTORY[0][0]
+        
+        # Before jamming
+        before_packets = [(e[0] - min_time, e[2]) for e in ENERGY_HISTORY if e[0] < jammer_start and e[1] != "JAMMER_01"]
+        if before_packets:
+            times_b, energies_b = zip(*before_packets)
+            ax1.scatter(times_b, energies_b, c='green', s=50, alpha=0.6, edgecolor='black', linewidth=0.5)
+            ax1.set_title(f"[BS {BS_ID}] Channel Occupancy BEFORE Jamming")
+            ax1.set_ylabel("Energy (W)")
+            ax1.grid(True, alpha=0.3)
+            ax1.set_yscale('log')
+        
+        # After jamming
+        after_packets = [(e[0] - min_time, e[2]) for e in ENERGY_HISTORY if e[0] >= jammer_start]
+        if after_packets:
+            times_a, energies_a = zip(*after_packets)
+            colors_a = ['red' if ENERGY_HISTORY[i][1] == "JAMMER_01" else 'orange' for i in range(len(ENERGY_HISTORY)) if ENERGY_HISTORY[i][0] >= jammer_start]
+            ax2.scatter(times_a, energies_a, c=colors_a, s=50, alpha=0.6, edgecolor='black', linewidth=0.5)
+            ax2.set_title(f"[BS {BS_ID}] Channel Occupancy AFTER Jamming (Red=Jammer, Orange=Legitimate)")
+            ax2.set_xlabel("Time (s)"); ax2.set_ylabel("Energy (W)")
+            ax2.grid(True, alpha=0.3)
+            ax2.set_yscale('log')
+        
+        plt.tight_layout()
+        figs.append(fig)
+    
+    # Plot 10: SPECTRUM UTILIZATION EFFICIENCY
+    if ENERGY_HISTORY:
+        fig = plt.figure(figsize=(10,6))
+        
+        # Calculate efficiency metrics
+        total_packets = len(ENERGY_HISTORY)
+        legit_packets = sum(1 for _, src, _ in ENERGY_HISTORY if src != "JAMMER_01")
+        jammed_packets = stats.get('jammed', 0)
+        delivered_packets = stats.get('delivered', 0)
+        
+        efficiency_data = {
+            'Transmitted': legit_packets,
+            'Successfully Delivered': delivered_packets,
+            'Jammed/Corrupted': jammed_packets,
+            'Queued': stats.get('queued', 0)
+        }
+        
+        labels = list(efficiency_data.keys())
+        values = list(efficiency_data.values())
+        colors_eff = ['green', 'darkgreen', 'red', 'orange']
+        
+        bars = plt.bar(labels, values, color=colors_eff, alpha=0.7, edgecolor='black', linewidth=2)
+        
+        # Add value labels on bars
+        for bar, val in zip(bars, values):
+            height = bar.get_height()
+            plt.text(bar.get_x() + bar.get_width()/2., height,
+                    f'{val}', ha='center', va='bottom', fontweight='bold')
+        
+        plt.title(f"[BS {BS_ID}] Spectrum Utilization Efficiency")
+        plt.ylabel("Packet Count")
+        plt.xticks(rotation=15)
+        plt.grid(True, alpha=0.3, axis='y')
+        figs.append(fig)
+    
+    # Save all plots
+    timestamp = time.strftime("%Y%m%dT%H%M%SZ", time.gmtime())
+    results_dir = RESULTS_DIR
+    pdf_path = os.path.join(results_dir, f"{BS_ID}_analysis_{timestamp}.pdf")
+    try:
+        with PdfPages(pdf_path) as pdf:
+            for f in figs:
+                pdf.savefig(f)
+                plt.close(f)
+        print(f"[BS {BS_ID}] Saved {len(figs)} analysis plots to {pdf_path}")
+    except Exception as e:
+        print(f"[BS {BS_ID}] Error saving plots: {e}")
+    
+    # Save statistics to text file
+    log_path = os.path.join(results_dir, f"{BS_ID}_stats_{timestamp}.txt")
+    try:
+        with open(log_path, 'w') as f:
+            f.write(f"=== BASE STATION {BS_ID} ANALYSIS ===\n\n")
+            f.write("Statistics:\n")
+            for key, val in stats.items():
+                f.write(f"  {key}: {val}\n")
+            f.write(f"\nJamming Last Seen: {time.time() - JAMMING_LAST_SEEN:.2f}s ago\n")
+            f.write(f"Total Energy Events: {len(ENERGY_HISTORY)}\n")
+            if ENERGY_HISTORY:
+                f.write(f"\nTop Senders:\n")
+                sender_counts = {}
+                for _, src, _ in ENERGY_HISTORY:
+                    sender_counts[src] = sender_counts.get(src, 0) + 1
+                for src, count in sorted(sender_counts.items(), key=lambda x: x[1], reverse=True)[:5]:
+                    f.write(f"  {src}: {count} packets\n")
+        print(f"[BS {BS_ID}] Saved statistics to {log_path}")
+    except Exception as e:
+        print(f"[BS {BS_ID}] Error saving stats: {e}")
+
 def main():
     threading.Thread(target=retry_worker, daemon=True).start()
     with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as sock:
@@ -254,7 +500,13 @@ def main():
                 conn, addr = sock.accept()
                 if conn.recv(1, socket.MSG_PEEK) == b'{': threading.Thread(target=handle_registered_client, args=(conn, addr), daemon=True).start()
                 else: threading.Thread(target=handle_hop_connection, args=(conn, addr), daemon=True).start()
-        except KeyboardInterrupt: STOP.set(); FRAME_PROCESSOR_POOL.shutdown(wait=False)
+        except KeyboardInterrupt: 
+            print(f"\n[BS {BS_ID}] Shutting down...")
+            STOP.set()
+            FRAME_PROCESSOR_POOL.shutdown(wait=False)
+            # Export analysis before exit
+            time.sleep(0.5)
+            export_base_station_analysis()
 
 if __name__ == "__main__":
     main()
