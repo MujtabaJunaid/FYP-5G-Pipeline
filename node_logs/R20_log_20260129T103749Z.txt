@@ -1,0 +1,47 @@
+2026-01-29T10:31:37.852024Z Received from S40: hello brother
+2026-01-29T10:31:43.785046Z Received from S40: how are you 
+2026-01-29T10:32:35.616513Z Received from S40: hehe goood tooooooooooooooooooooooooooo hhhhhhhhhhhhhheeeeeeeeeeeeeeeeeeaaaaaaaaaaaaaaaaaaaaaaaaaarrrrrrrrrrrrrrrrrrrrrrrrr tttttttttttttttttttthhhhhhhhhhhhhhhhhhhhhhhhhhaaaaaaaaaaaaaaaaaaaaaaaaaaaattttttttttttttttttttttttttt hhhhhhheeeeeeeeeeeeeeeehhhhhhhhhhhhhhhheeeeeeeeeeeeeeeee
+2026-01-29T10:33:42.119967Z Received JAMMED/CORRUPTED packet from S40
+2026-01-29T10:33:52.321455Z Received from S40: cannn you hearrr meeee
+2026-01-29T10:33:54.589729Z Received from S40: hheheehe
+2026-01-29T10:33:57.313547Z Received JAMMED/CORRUPTED packet from S40
+2026-01-29T10:34:53.634246Z Received JAMMED/CORRUPTED packet from S40
+2026-01-29T10:34:58.966102Z Received from S40: your msgs
+2026-01-29T10:35:28.674321Z Received JAMMED/CORRUPTED packet from S40
+2026-01-29T10:35:45.571982Z Received JAMMED/CORRUPTED packet from S40
+2026-01-29T10:36:04.487367Z Received JAMMED/CORRUPTED packet from S40
+2026-01-29T10:36:27.511619Z Received JAMMED/CORRUPTED packet from S40
+2026-01-29T10:36:34.610113Z Received from S40: iam going
+2026-01-29T10:36:38.412568Z Received from S40: byee
+2026-01-29T10:37:27.735667Z Received JAMMED/CORRUPTED packet from S40
+2026-01-29T10:37:29.494960Z Received from S40: may he rest in hell
+Peer: S40
+Msg: hello brother (QAM-16)
+Msg: how are you  (QAM-16)
+Msg: iam good (QAM-16)
+Msg: wby (QAM-16)
+Msg: hehe goood tooooooooooooooooooooooooooo hhhhhhhhhhhhhheeeeeeeeeeeeeeeeeeaaaaaaaaaaaaaaaaaaaaaaaaaarrrrrrrrrrrrrrrrrrrrrrrrr tttttttttttttttttttthhhhhhhhhhhhhhhhhhhhhhhhhhaaaaaaaaaaaaaaaaaaaaaaaaaaaattttttttttttttttttttttttttt hhhhhhheeeeeeeeeeeeeeeehhhhhhhhhhhhhhhheeeeeeeeeeeeeeeee (QAM-64)
+Msg: wwwwwwwwwwwwwwwwwwwooooooooooooooooooooooooooooowwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwwww (QAM-16)
+Msg: [JAMMED] CORRUPTED DATA (QAM-16)
+Msg: cannn you hearrr meeee (QAM-16)
+Msg: hheheehe (QAM-16)
+Msg: [JAMMED] CORRUPTED DATA (QAM-16)
+Msg: there is alot of disturrption my firent (QAM-16)
+Msg: i cant get you msg properly (QAM-16)
+Msg: [JAMMED] CORRUPTED DATA (QAM-16)
+Msg: your msgs (QAM-16)
+Msg: [JAMMED] CORRUPTED DATA (QAM-16)
+Msg: helloo?? (QAM-16)
+Msg: helllooooo?? (QAM-16)
+Msg: [JAMMED] CORRUPTED DATA (QAM-16)
+Msg: koiii haeeee????? (QAM-16)
+Msg: [JAMMED] CORRUPTED DATA (QAM-16)
+Msg: tfff is wrongggg (QAM-16)
+Msg: [JAMMED] CORRUPTED DATA (QAM-16)
+Msg: iam going (QAM-16)
+Msg: byee (QAM-16)
+Msg: there is and attacker (QAM-16)
+Msg: interrupting the pipelinee (QAM-16)
+Msg: interrupting the pipelinee (QAM-16)
+Msg: [JAMMED] CORRUPTED DATA (QAM-16)
+Msg: may he rest in hell (QAM-16)
